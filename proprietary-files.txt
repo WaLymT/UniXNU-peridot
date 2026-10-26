@@ -1,0 +1,9 @@
+# Required firmware inputs: relative path | source | SHA-256 | consumer
+#
+# Paths resolve under .cache/firmware in this repository. Every file is the
+# vendor's and stays out of Git; record where it came from and its hash.
+#
+# gpu/            Adreno 735 ZAP shader and GPU firmware          | gpu
+# wifi/           WCN6750 firmware and board data                 | network
+# audio/          ADSP firmware and codec calibration             | audio
+# modem/          MPSS firmware images                            | not planned

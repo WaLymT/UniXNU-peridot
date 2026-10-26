@@ -1,0 +1,212 @@
+schema_version = 1
+
+[device]
+name = "peridot"
+soc = "SM8635"
+os_profile = "ipados-17.7.11-21H461"
+summary = "Redmi Turbo 3 / POCO F6 on Qualcomm SM8635 (cliffs). The board selects the iPadOS 17.7.11 profile and the SM8635 shared support. Every area starts as planned: the configuration exists, no build or hardware result has been recorded yet."
+
+[[area]]
+id = "configuration"
+status = "planned"
+components = []
+paths = ["board.toml", "feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore"]
+inputs = ["SM8635 shared support, the iPadOS 17.7.11 profile, this board's defconfig and the pinned component sources."]
+configuration = ["board.soc = SM8635; board.soc_source = sm8635; board.os_profile = ipados-17.7.11-21H461.", "The board selects only ArmDTPlatform, ArmCpu, SoftwareAES, XnuPrelink and DarwinBoot; storage, display and input components are added when their board recipes exist."]
+procedure = ["Read https://unixnu.com/porting/device-repository and https://unixnu.com/porting/records.", "Run ./unixnu defconfig peridot_defconfig -D ../UniXNU-peridot from the UniXNU checkout.", "Run ./unixnu status --json -D ../UniXNU-peridot and review profiles, components, source pins and patch order."]
+findings = ["Tables merge in ARM64, SoC, OS and device order. Arrays replace inherited selections, so every required component and fragment is listed explicitly.", "The board inherits [ipsw] and [kernel.prelink] from the OS profile. Overriding either in board.toml would desynchronise the kernelcache pin from the components it was qualified against."]
+completion = ["All source pins resolve, status shows the intended component set and patch order, and the porting record check passes."]
+limits = ["The SM8635 shared repository is new and unverified; its addresses are copied from the board's stock DTS."]
+next_action = ["Resolve the SM8635 source pin and run status once the shared repository is published."]
+
+[[area.evidence]]
+kind = "source"
+reference = "board.toml"
+result = "Board identity, profile selection, component list, firmware and payload inputs."
+
+[[area]]
+id = "firmware"
+status = "planned"
+components = ["DarwinBoot"]
+paths = ["board.toml", "proprietary-files.txt", "package/"]
+inputs = ["Mu-Silicium Platforms/Xiaomi/peridotPkg, its Resources/Configs/peridot.toml, the stock firmware DTB and the PSCI SMC interface."]
+configuration = ["firmware.dsc = Platforms/Xiaomi/peridotPkg/peridot.dsc; firmware.config = peridot; firmware.fd = Build/peridotPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd.", "The firmware DSC and FDF must embed UniXNU, UniXNUDxe, DarwinBoot, UniXNURamDiskDxe, DiskIoDxe and FAT support."]
+procedure = ["Build the stock peridotPkg firmware first and boot it with fastboot boot to verify display, side buttons and block devices.", "Then run ./unixnu build firmware -D ../UniXNU-peridot --uefi ../Mu-Silicium and boot the resulting image."]
+findings = ["peridotPkg already loads at 0xA7100000 with size 0x300000 and reports display, internal storage, side buttons, USB device mode and mass storage as working in the Mu-Silicium status page.", "Mu-Silicium labels peridot Inactive: the platform has no active maintainer, so any firmware fault has to be fixed here."]
+completion = ["The firmware boots, shows the UniXNU menu, publishes the payload RAM disk and hands the framebuffer to DarwinBoot."]
+limits = ["The peridot firmware configuration is unmaintained upstream; SM8635 and SM7675 share the Palawan platform package."]
+next_action = ["Build and boot the stock peridot firmware to confirm the platform on this unit."]
+
+[[area.evidence]]
+kind = "source"
+reference = "https://github.com/Project-Silicium/Mu-Silicium/blob/main/Platforms/Xiaomi/peridotPkg/peridot.dsc"
+result = "FD base and size, framebuffer geometry, SM8635 platform selection."
+
+[[area]]
+id = "cpu"
+status = "planned"
+components = ["ArmCpu", "ArmDTPlatform"]
+paths = ["dts/**", "dts/vendor/peridot-stock.dts"]
+inputs = ["Eight cores with MPIDR 0x000 through 0x700, GIC distributor at 0x17100000, redistributors at 0x17180000 with 0x40000 stride, 19.2 MHz timer and PSCI over SMC."]
+configuration = ["dts/peridot.dts includes sm8635.dtsi from the SoC source.", "cpu_regs lists every MPIDR in the ADT; clusters are A520 (E), A720 (P) and X4 (P)."]
+procedure = ["Compile the board DTS and inspect enabled CPUs, GIC ranges and timer properties in the ADT.", "Record per-CPU entry, timer interrupts and IPI delivery for each core."]
+findings = ["The stock DTS describes every core as qcom,kryo; the dtsi uses the ARM generic compatible strings so the platform expert builds CPU nubs.", "GIC and redistributor ranges match SM8550 exactly, so the SoC dtsi can keep that layout."]
+completion = ["Every enabled CPU reaches its entry checkpoint and timer and IPI handling work on each core."]
+limits = ["CPU frequency policy is a board input and is not implemented."]
+next_action = ["Verify the redistributor count against the GICR_TYPER value on the device."]
+
+[[area.evidence]]
+kind = "source"
+reference = "dts/vendor/peridot-stock.dts"
+result = "CPU MPIDR values, GIC ranges and redistributor stride."
+
+[[area]]
+id = "memory"
+status = "planned"
+components = []
+paths = ["dts/**", "dts/vendor/peridot-stock.dts", "board.toml"]
+inputs = ["DRAM at 0x80000000, 12 GiB on this unit (ddr_size = 0x0c). UEFI runs inside 0xA7100000 to 0xA7400000; the display reservation is 0xE3940000 with size 0x2B00000."]
+configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size and payload.adt.owned_memory_size are both 0x380000000; both are flagged for verification against the firmware memory map."]
+procedure = ["Compare the firmware memory map, the DTS memory and reserved-memory nodes and the ADT memory-map entries before the first boot.", "Check every DMA range against the controller address width and SMMU mapping before enabling a driver."]
+findings = ["The top of DRAM for a 12 GiB device starting at 0x80000000 is 0x380000000; the payload values use that address and still need confirmation.", "apps SMMU sits at 0x15000000, the same address as SM8550."]
+completion = ["Every handoff region is accounted for and each DMA engine reaches its range with the documented cache policy."]
+limits = ["The RAM size varies by SKU, so both payload values must be re-derived per unit."]
+next_action = ["Read the firmware memory map and record it here."]
+
+evidence = []
+
+[[area]]
+id = "storage"
+status = "planned"
+components = []
+paths = ["board.toml", "dts/vendor/peridot-stock.dts"]
+inputs = ["UFS host at 0x1d84000 with size 0x3000, ICE at 0x1d88000, ICE hardware key manager at 0x1d90000, MCQ registers, PHY at 0x1d80000 and the apps SMMU stream 0x60."]
+configuration = ["CONFIG_XNU_NATIVE_UFS is not set in peridot_defconfig until a storage implementation exists.", "The userdata window in board.toml is left at zero: the first and last LBA must come from this phone's GPT."]
+procedure = ["Read the GPT and confirm the userdata entry before writing any board value.", "Adapt the UFS implementation to the cliffs PHY generation and the MCQ register set, then verify a single-block read before mounting a root."]
+findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions that the SM8550 implementation does not use.", "ShengUfs keeps GCC and SMMU handling as constants, so reusing it means re-deriving the clock and stream tables for cliffs."]
+completion = ["SCSI capacity, GPT and known blocks are correct, then the configured root volume mounts and launchd starts."]
+limits = ["No storage driver is selected. This is the highest-risk area of the port."]
+next_action = ["Confirm the UFS controller version from the device and decide whether ShengUfs can be adapted or a new implementation is needed."]
+
+evidence = []
+
+[[area]]
+id = "display"
+status = "planned"
+components = []
+paths = ["board.toml", "dts/**"]
+inputs = ["Framebuffer 1220 by 2712 at 32 bits per pixel, published by UEFI GOP and reserved at 0xE3940000 with size 0x2B00000."]
+configuration = ["bootimg.dtb_node adds /reserved-memory/splash_region with label cont_splash_region for the boot image.", "adt.product.string overrides artwork-display-gamut to sRGB for the 8-bit GOP path."]
+procedure = ["Confirm the panel is initialised by the bootloader and that GOP reports the expected geometry.", "Select GopFramebuffer once the kernel reaches the display checkpoint."]
+findings = ["The stock DTS contains three panel variants (n16t_42_02_0a, n16t_36_0f_0b and n16t_42_0a_0c), but the UniXNU path drives the UEFI framebuffer and does not program the panel.", "The UEFI framebuffer geometry matches the panel resolution, so no scaling step is needed."]
+completion = ["A known frame appears with correct geometry and colours, then userland presentation works."]
+limits = ["Display depends on the bootloader having already trained the panel; a cold panel start is out of scope for this path."]
+next_action = ["Record the reported GOP geometry on the device."]
+
+evidence = []
+
+[[area]]
+id = "input"
+status = "planned"
+components = []
+paths = ["dts/vendor/peridot-stock.dts", "board.toml"]
+inputs = ["Focaltech N16T-3683G touch controller on SPI, reported by the stock DTS as xiaomi,peridot-spi and focaltech,n16t-3683g-spi. Side buttons are separate GPIO keys."]
+configuration = ["adt.buttons declares hold, voldown and volup without a menu button and sets home-button-type = 2 for gesture navigation."]
+procedure = ["Read the touch controller identification from the stock firmware to confirm the panel and touch pairing on this unit.", "Implement a SPI transport and a focaltech report decoder, then publish them through the HID input path."]
+findings = ["Neither the UniXNU catalog nor HakiOS has a focaltech SPI touch driver: sheng uses Novatek and HakiOS uses Goodix.", "The stock DTS also carries a goodix node, so units may differ in touch supplier."]
+completion = ["Touch reports reach the HID stack and drive the lock screen and SpringBoard."]
+limits = ["No input driver is selected beyond the ADT button declaration."]
+next_action = ["Confirm the touch controller on this unit before writing a driver."]
+
+evidence = []
+
+[[area]]
+id = "gpu"
+status = "planned"
+components = []
+paths = ["dts/vendor/peridot-stock.dts"]
+inputs = ["Adreno 735, chip id 0x43030b00, gen7-11-0, at 0x3d00000 with GMU at 0x3d68000 and GPU SMMU at 0x3da0000."]
+configuration = ["The gpu, gmu and gpu_smmu nodes are present but disabled in sm8635.dtsi.", "No GPU component is selected: Adreno740 and AdrenoMetal target the SM8550 part."]
+procedure = ["Confirm the GPU chip id from the vendor kernel log before selecting any implementation.", "Bring up the GPU only after storage, display and input work."]
+findings = ["The GPU is a different part from sheng's: chip id 0x43030b00 against 0x43050a01, and the GMU compatible is qcom,gen7-gmu rather than qcom,adreno-gmu-740.1.", "The GPU SMMU and its register window keep the SM8550 addresses."]
+completion = ["A GPU provider matches the ADT node and renders a frame."]
+limits = ["No GPU work is planned before the system boots to launchd."]
+next_action = ["Record the GPU revision and firmware names from the vendor partition."]
+
+evidence = []
+
+[[area]]
+id = "network"
+status = "planned"
+components = []
+paths = ["dts/vendor/peridot-stock.dts", "proprietary-files.txt"]
+inputs = ["Qualcomm WCN6750 wireless chip on PCIe, plus the vendor firmware from /vendor/firmware_mnt."]
+configuration = ["No network component is selected; the catalog's Ath12kWifi targets a different generation."]
+procedure = ["Collect the WCN6750 firmware and board data files from the vendor partition.", "Select or write an implementation once the boot path is stable."]
+findings = ["The wireless part matches the WCN6750 in HakiOS's POCO X5 Pro port, which contains a working ath11k based stack that could inform this port.", "UniXNU's catalog has no component for this generation."]
+completion = ["The interface appears and associates with an access point."]
+limits = ["No network work is planned before the system boots to launchd."]
+next_action = ["Inventory the wireless firmware files from the vendor partition."]
+
+evidence = []
+
+[[area]]
+id = "audio"
+status = "planned"
+components = []
+paths = ["proprietary-files.txt"]
+inputs = ["Qualcomm audio DSP firmware and the vendor calibration data on the vendor partition."]
+configuration = ["No audio component is selected."]
+procedure = ["Collect the DSP firmware and the board calibration files.", "Bring up the DSP transport and then the codec path."]
+findings = ["Audio needs the ADSP firmware, GLINK and the codec configuration, none of which is present for this board."]
+completion = ["Playback and capture work through the DSP."]
+limits = ["Out of scope until the system boots to launchd."]
+next_action = ["Inventory the audio firmware files."]
+
+evidence = []
+
+[[area]]
+id = "power"
+status = "planned"
+components = []
+paths = ["dts/**", "board.toml"]
+inputs = ["PMIC and regulator topology from the stock DTS, plus the RPMh resource set at 0x17a00000."]
+configuration = ["No power policy is configured. payload.adt.defaults sets only sleep-disabled when needed."]
+procedure = ["Record the regulator topology and the CPU frequency domains before adding any power policy.", "Drive the regulators from the board package rather than the kernel."]
+findings = ["The stock DTS declares the RPMh controller and the regulator tree; none of it is modelled in the current dtsi.", "The SM8550 board package keeps its power policy in the board, and this port follows that split."]
+completion = ["Rails come up in the documented order and the device survives a suspend and resume cycle."]
+limits = ["No power management is implemented."]
+next_action = ["Extract the regulator tree from the stock DTS."]
+
+evidence = []
+
+[[area]]
+id = "packaging"
+status = "planned"
+components = ["SoftwareAES", "XnuPrelink"]
+paths = ["board.toml", "configs/**", "patches/xnu/**", "package/"]
+inputs = ["The iPadOS 17.7.11 kernelcache, trust cache bundle, Data seed, platform seed and the firmware DTB."]
+configuration = ["config_fragments and patch_series list arch, soc, os and device roots in that order.", "payload.volume = PERIDOT with 192 MiB, and skip_setup_tool is left unset because that step needs macOS image tools."]
+procedure = ["Run ./unixnu ipsw fetch, then ./unixnu kernel, package, firmware, payload and bootimg in that order.", "Keep the kernelcache, trust cache and Data seed outside the repository."]
+findings = ["Prelink inputs come from the OS profile; this board must not restate them.", "The macOS-only skip-setup and seed-data-grow steps need the macOS runner workflow."]
+completion = ["Every step produces its artifact and the boot image contains the expected firmware, device tree and payload."]
+limits = ["No artifact has been produced yet."]
+next_action = ["Run ipsw fetch and the kernel step to produce the first artifacts."]
+
+evidence = []
+
+[[area]]
+id = "diagnostics"
+status = "planned"
+components = []
+paths = ["board.toml", "package/"]
+inputs = ["UEFI log buffer at 0x81CE4000, the panic screen patch and the boot progress checkpoints."]
+configuration = ["payload.panic_screen is enabled; kernel_args include -v, serial=3 and boot-progress=2.", "No board diagnostics package exists yet."]
+procedure = ["Capture the firmware log before the kernel handoff and keep each checkpoint separately.", "Use the bring-up guide to record the first failing checkpoint."]
+findings = ["The peridot memory map provides a UEFI log region, so firmware faults can be captured without a UART.", "The phone exposes USB device mode, so logs can be retrieved without serial hardware."]
+completion = ["A failing boot identifies its last completed checkpoint from captured logs."]
+limits = ["No log capture has been performed on this board."]
+next_action = ["Capture the firmware log from the first boot attempt."]
+
+evidence = []
+

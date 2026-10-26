@@ -1,0 +1,27 @@
+# peridot kernel configuration.
+#
+# The ARM64 fragment already sets BUILD_ARCHIVES, ARM_DT_PLATFORM, ARMCPU,
+# NATIVE_AES, NATIVE_ARCH_TIMER and NATIVE_PAN. The OS fragment sets
+# TRUST_CACHE_RUNTIME, SOURCE_MOCKFS, NATIVE_CS_HASH_CACHE and
+# CRYPTO_BOOTSTRAP. Only board deltas belong here.
+#
+# Nothing is enabled yet: this board has no storage, display, input or GPU
+# implementation selected. Add each flag together with its component and its
+# porting record entry.
+
+# Storage: enable once a UFS implementation covers the cliffs PHY and the MCQ
+# register set.
+# CONFIG_XNU_NATIVE_UFS is not set
+
+# Display: enable together with the GopFramebuffer component.
+# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set
+
+# No VirtIO or RAM block device on this board.
+# CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
+# CONFIG_XNU_NATIVE_RAM_BLOCK is not set
+
+# No SoC power or PMGR policy yet. This is the sheng-specific flag: it must not
+# be enabled for peridot.
+# CONFIG_XNU_SHENG_PMGR is not set
+
+CONFIG_XNU_ARMVIRT_PLATFORM=n

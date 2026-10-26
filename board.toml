@@ -1,0 +1,126 @@
+# peridot (Redmi Turbo 3 / POCO F6) — UniXNU device repository, format 2.
+#
+# Every value below is either taken from a named source or marked TODO(verify).
+# Sources: stock DTS (dts/vendor/peridot-stock.dts), Mu-Silicium
+# Platforms/Xiaomi/peridotPkg (peridot.dsc, Library/MemoryMapLib),
+# Resources/Configs/peridot.toml, and on-device getprop.
+schema_version = 2
+
+[board]
+name = "peridot"
+soc = "SM8635"
+soc_source = "sm8635"
+description = "Redmi Turbo 3 / POCO F6"
+kit = "peridot"
+os_profile = "ipados-17.7.11-21H461"
+
+# ArmDTPlatform and ArmCpu come from the ARM64 profile. DarwinBoot and
+# XnuPrelink are required to boot. Storage, display and input components are
+# added once their board recipes exist; see the porting record for the order.
+[components]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+
+[kernel]
+defconfig = "peridot_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8635.config", "os:configs/ipados.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+
+# [kernel.prelink] is inherited from the OS profile: the iPadOS 17.7.11
+# kernelcache pin, slide, early_security_init address and roots list all belong
+# to that image, not to this board. Do not override them here.
+
+[device_tree]
+source = "device:dts/peridot.dts"
+include_dirs = ["soc:dts"]
+
+[firmware]
+config = "peridot"
+dsc = "Platforms/Xiaomi/peridotPkg/peridot.dsc"
+fd = "Build/peridotPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/Xiaomi",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+  "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
+  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+]
+
+[firmware.defines]
+DEVICE_MODEL = "peridot"
+ENABLE_SECUREBOOT = "1"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+
+[payload]
+volume = "PERIDOT"
+size_mib = 192
+loader = "firmware"
+title = "UniXNU (peridot)"
+panic_screen = true
+# TODO(verify): top of DRAM for a 12 GiB device at 0x80000000. The only
+# existing peridot reference (kvfsrl board.toml) uses 0x380000000; confirm
+# against the firmware memory map before trusting it.
+dram_size = "0x380000000"
+kernel_args = ["-v", "serial=3", "debug=0x14e", "boot-progress=2"]
+
+[payload.adt]
+# TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
+# platform (iPad7,1 / A10X). Keep it equal to ipsw.chip_id unless the ADT
+# tool needs the host SoC id instead.
+chip_id = "32785"
+# TODO(verify): same 12 GiB window as dram_size.
+owned_memory_size = "0x380000000"
+# CPU MPIDR values read from the stock DTS: eight cores at 0x000..0x700.
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+psci_method = "smc"
+packed_data_ramdisk = true
+# TODO(verify): a property of the iPadOS 17.7.11 Data image, copied from the
+# sheng board. Re-derive it from the selected IPSW before the payload step.
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+unique_chip_id = "required"
+
+[userdata]
+# TODO(REQUIRED): both values come from the GPT entry named "userdata" on this
+# phone. Do not guess them: a wrong window writes outside the intended region.
+#
+# Measured on 2026-10-26 (fastboot getvar partition-size:userdata):
+#   0x78587FB000 bytes = 126191611 LBAs at 4096 bytes. Use it to cross-check the
+#   size of the GPT entry; last_lba - first_lba + 1 must equal this count.
+# Also measured: max-download-size 768 MiB, partition-size:boot 96 MiB,
+# partition-size:super 8.5 GiB, current-slot a, slot-count 2.
+first_lba = 0
+last_lba = 0
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[[bootimg.dtb_node]]
+path = "/reserved-memory/splash_region"
+props = [
+  { name = "label", type = "s", value = "cont_splash_region" },
+  { name = "reg", type = "x", value = ["0x0", "0xe3940000", "0x0", "0x2b00000"] },
+]
+
+# The OS profile writes the iPad7,1 identity. Only board properties belong here.
+[adt.buttons]
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+[adt.buttons.u32]
+home-button-type = 2
+
+[adt.product.string]
+# The GOP path is 8-bit; the profile defaults to P3 for the original panel.
+artwork-display-gamut = "sRGB"

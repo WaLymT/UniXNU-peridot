@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Board DTS for the Redmi Turbo 3 / POCO F6 (peridot, Qualcomm SM8635 "cliffs").
+//
+// This is the small hand-written board description consumed by the ADT
+// generator. The vendor dump that ships with the phone lives in
+// dts/vendor/peridot-stock.dts and is a reference, not an input.
+/dts-v1/;
+/include/ "sm8635.dtsi"
+
+/ {
+    model = "Xiaomi Redmi Turbo 3 / POCO F6";
+    compatible = "xiaomi,peridot", "qcom,cliffs-mtp", "qcom,cliffs", "qcom,sm8635";
+
+    // TODO(verify): 12 GiB at 0x80000000. Confirm with the firmware map; the
+    // size cell needs the 64-bit form <0x3 0x00000000>.
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0 0x80000000 0x3 0x00000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        // Display_Reserved in the Mu-Silicium peridot memory map.
+        splash_region: framebuffer@e3940000 {
+            label = "cont_splash_region";
+            reg = <0 0xe3940000 0 0x2b00000>;
+            no-map;
+        };
+    };
+};
+
+// A520 cores run as the E cluster, A720 and the X4 as the P cluster.
+&cpu0 { unixnu,cluster-type = "E"; };
+&cpu1 { unixnu,cluster-type = "E"; };
+&cpu2 { unixnu,cluster-type = "E"; };
+&cpu3 { unixnu,cluster-type = "P"; };
+&cpu4 { unixnu,cluster-type = "P"; };
+&cpu5 { unixnu,cluster-type = "P"; };
+&cpu6 { unixnu,cluster-type = "P"; };
+&cpu7 { unixnu,cluster-type = "P"; };
+
+// Storage is described but has no driver yet; see the storage area of porting.toml.
+&ufs { status = "okay"; };
+&ufsphy { status = "okay"; };
+&apps_smmu { status = "okay"; };

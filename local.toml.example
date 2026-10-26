@@ -1,0 +1,14 @@
+# Copy to local.toml (ignored by Git) to point modules at local checkouts.
+
+[[source]]
+kind = "soc"
+name = "sm8635"
+local = "../UniXNU-sm8635-common"
+
+[build]
+device = "."
+uefi = "../Mu-Silicium"
+# Fill these with real paths before the kernel and payload steps.
+# dtb = "/path/to/firmware.dtb"
+# kernelcache = "/path/to/kernelcache"
+# unique_chip_id = "REQUIRED_DEVICE_SEED"

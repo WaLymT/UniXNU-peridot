@@ -1,0 +1,7 @@
+# Pinned shared support for this board.
+
+[[source]]
+name = "sm8635"
+kind = "soc"
+git = "https://github.com/OWNER/UniXNU-sm8635-common"
+commit = "TODO-40-CHARACTER-COMMIT"
