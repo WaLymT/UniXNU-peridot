@@ -34,6 +34,13 @@ and inspect; no build or boot result exists yet. Every subsystem is recorded as
 | Firmware | Mu-Silicium `Platforms/Xiaomi/peridotPkg` | upstream, marked Inactive |
 | UFS | host 0x1d84000, PHY 0x1d80000, stream 0x60 | stock DTS |
 | GPU | Adreno 735, chip id 0x43030b00 | stock DTS |
+| Boot image | header v0, pagesize 4096 only | measured, see [UEFI bring-up](docs/uefi-bringup.md) |
+| UEFI | Silicium menu appears on the panel | measured, see [UEFI bring-up](docs/uefi-bringup.md) |
+
+The firmware chain is verified on hardware: the stock `peridotPkg` firmware
+builds to a 3 MiB volume, boots through `fastboot boot`, and shows the Silicium
+UEFI menu. The volume has no bootable entry yet; adding UniXNU to it is the next
+step. Every other subsystem is still `planned` in [porting.toml](porting.toml).
 
 ## Build
 

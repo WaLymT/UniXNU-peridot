@@ -124,3 +124,13 @@ home-button-type = 2
 [adt.product.string]
 # The GOP path is 8-bit; the profile defaults to P3 for the original panel.
 artwork-display-gamut = "sRGB"
+
+# Measured on the device: this bootloader rejects every signed-header variant
+# with "Failed to load/authenticate boot image: Invalid Parameter" and accepts
+# only the legacy layout. See docs/uefi-bringup.md.
+#
+# base, kernel_offset, ramdisk_offset and tags_offset keep the Mu-Silicium
+# defaults the working image used; only the two keys below were decisive.
+[bootimg.image]
+header_version = 0
+pagesize = 4096

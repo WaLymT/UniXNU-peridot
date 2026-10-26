@@ -26,21 +26,28 @@ result = "Board identity, profile selection, component list, firmware and payloa
 
 [[area]]
 id = "firmware"
-status = "planned"
+status = "device-verified"
 components = ["DarwinBoot"]
-paths = ["board.toml", "proprietary-files.txt", "package/"]
+paths = ["board.toml", "proprietary-files.txt", "package/", "docs/uefi-bringup.md"]
 inputs = ["Mu-Silicium Platforms/Xiaomi/peridotPkg, its Resources/Configs/peridot.toml, the stock firmware DTB and the PSCI SMC interface."]
-configuration = ["firmware.dsc = Platforms/Xiaomi/peridotPkg/peridot.dsc; firmware.config = peridot; firmware.fd = Build/peridotPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd.", "The firmware DSC and FDF must embed UniXNU, UniXNUDxe, DarwinBoot, UniXNURamDiskDxe, DiskIoDxe and FAT support."]
+configuration = ["firmware.dsc = Platforms/Xiaomi/peridotPkg/peridot.dsc; firmware.config = peridot; firmware.fd = Build/peridotPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd.", "The firmware DSC and FDF must embed UniXNU, UniXNUDxe, DarwinBoot, UniXNURamDiskDxe, DiskIoDxe and FAT support.", "bootimg.image pins header_version = 0 and pagesize = 4096; the device rejects every signed-header variant."]
 procedure = ["Build the stock peridotPkg firmware first and boot it with fastboot boot to verify display, side buttons and block devices.", "Then run ./unixnu build firmware -D ../UniXNU-peridot --uefi ../Mu-Silicium and boot the resulting image."]
-findings = ["peridotPkg already loads at 0xA7100000 with size 0x300000 and reports display, internal storage, side buttons, USB device mode and mass storage as working in the Mu-Silicium status page.", "Mu-Silicium labels peridot Inactive: the platform has no active maintainer, so any firmware fault has to be fixed here."]
+findings = ["peridotPkg already loads at 0xA7100000 with size 0x300000 and reports display, internal storage, side buttons, USB device mode and mass storage as working in the Mu-Silicium status page.", "Mu-Silicium labels peridot Inactive: the platform has no active maintainer, so any firmware fault has to be fixed here.", "Measured on the device: the RELEASE build produces a 3 MiB SILICIUM_UEFI.fd and the Silicium UEFI menu appears on the panel.", "Header v4, v4 with os_version and v1 are all rejected with Failed to load/authenticate boot image: Invalid Parameter; only header v0 with pagesize 4096 boots.", "With no bootable entry the menu returns to the bootloader after a while, and repeated failed fastboot boot attempts make the bootloader mark the active slot unbootable until fastboot --set-active clears it."]
 completion = ["The firmware boots, shows the UniXNU menu, publishes the payload RAM disk and hands the framebuffer to DarwinBoot."]
-limits = ["The peridot firmware configuration is unmaintained upstream; SM8635 and SM7675 share the Palawan platform package."]
-next_action = ["Build and boot the stock peridot firmware to confirm the platform on this unit."]
+limits = ["The peridot firmware configuration is unmaintained upstream; SM8635 and SM7675 share the Palawan platform package.", "The firmware volume has no bootable entry yet, so the menu is the end of the current chain."]
+next_action = ["Add UniXNU, DarwinBoot and UniXNURamDiskDxe to the firmware volume so the menu has a boot option."]
 
 [[area.evidence]]
 kind = "source"
 reference = "https://github.com/Project-Silicium/Mu-Silicium/blob/main/Platforms/Xiaomi/peridotPkg/peridot.dsc"
 result = "FD base and size, framebuffer geometry, SM8635 platform selection."
+
+[[area.evidence]]
+kind = "device"
+reference = "docs/uefi-bringup.md"
+result = "Silicium UEFI menu appears on the panel when booted with header v0 and pagesize 4096."
+command = "fastboot boot Mu-peridot.img"
+revision = "8b9acafab284a2f0d2ad91cf4c4dac204236e75b"
 
 [[area]]
 id = "cpu"
