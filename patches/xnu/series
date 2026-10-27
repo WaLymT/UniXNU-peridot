@@ -1,3 +1,4 @@
 # Board patch paths, one per line in application order.
 # Empty: this board needs no XNU patch of its own yet. SoC and OS patches
 # apply through their own series.
+native-smp-secondary.patch

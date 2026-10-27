@@ -74,10 +74,12 @@ panic_screen = false
 # "MMU enable hung" (no reset) from "hung later in platform init" (resets after
 # this many seconds).
 entry_probe_reset_delay = 6
-# Bisect the post-MMU stall one call at a time. A reset here means arm_vm_init
-# returned, so the next run can move the probe further along.
-entry_probe_reset_after = "_wfe_timeout_init"
-# at all. Yes means the hang is inside arm_vm_init; no means it is earlier.
+# Bisect the post-MMU stall one call at a time. Each run moves the probe one
+# call further along; a reset means that call returned. Current frontier: the
+# CPU topology parser, which stalls between its first ml_is_boot_cpu() call and
+# its return.
+entry_probe_reset_after = "_ml_parse_cpu_topology"
+entry_probe_reset_in = "_arm_init"
 # 12 GiB at 0x80000000, taken from the memory node in dts/peridot.dts.
 # The generator requires this to equal the DTS size cell exactly.
 dram_size = "0x80000000"
