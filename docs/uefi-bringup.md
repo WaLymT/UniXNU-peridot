@@ -72,3 +72,88 @@ python Resources\Scripts\mkbootimg.py `
 
 fastboot boot Mu-peridot.img
 ```
+
+## Payload volume
+
+UniXNU reads its configuration from a FAT volume that the firmware publishes as
+a block device. Getting there took three separate fixes; all three are required.
+
+### 1. The entry-argument HOB has no producer in Mu-Silicium
+
+`UniXNURamDiskDxeEntry` starts with
+
+```c
+Hob = GetFirstGuidHob (&mEntryArgHobGuid);   // DAEE82E6-8090-4E72-BF B9 ...
+if (Hob == NULL) {
+  return EFI_SUCCESS;                        // silently does nothing
+}
+```
+
+Mu-Silicium ships the consumer but never creates that HOB, so the driver returns
+before publishing anything. `uefi-sheng` publishes it in
+`SiliciumPkg/Sec/Sec.c`. `peridot/tools/inject-entryarg-hob.ps1` adds the four
+pieces: the GUID in `SiliciumPkg.dec`, `Sec.inf` `[Guids]`, saving the incoming
+`x0` in `Sec/AArch64/ModuleEntryPoint.S`, and the `BuildGuidDataHob` call.
+
+The call must run **after** `ProcessLibraryConstructorList ()`. Placed before it,
+the HOB list is not ready yet and DXE dispatch breaks: the firmware then reports
+`Failed to Find an Operating System!` because UniXNUDxe never registers a boot
+option.
+
+### 2. The DTB carries stale initrd addresses
+
+`UniXNURamDiskDxe` publishes whatever `/chosen/linux,initrd-start` and `-end`
+point at. The stock `Resources/DTBs/peridot.dtb` still holds the addresses from
+Xiaomi's own boot image, and nothing in the Mu-Silicium path rewrites them.
+
+The address that works is the one the boot image header implies:
+
+```
+initrd = base + ramdisk_offset = 0x10000000 + 0x01000000 = 0x11000000
+```
+
+So the DTB must be patched before it is appended to the kernel. Use
+`peridot/tools/dtbinitrd.py`, which walks the FDT structure block instead of
+substituting bytes, and set `start = 0x11000000`, `end = start + payload size`.
+The length must be a whole number of 512-byte sectors or the driver refuses it.
+
+### 3. The file name needs VFAT long names
+
+`unixnu.toml` does not fit 8.3: a plain short entry truncates to `UNIXNU.TOM` and
+the boot manager never matches it. The volume therefore needs long-name slots
+(with the VFAT checksum over the short alias) for that file.
+`peridot/tools/mkpayload.py` writes them; `peridot/tools/mkpayload2.py` is the
+pyfatfs variant.
+
+### Verified result
+
+With all three in place the menu lists the entry defined in the payload:
+
+```toml
+version = 1
+[boot]
+timeout = 30
+default = "xnu"
+[[entry]]
+id = "xnu"
+title = "UniXNU"
+type = "xnu"
+path = "Payloads/kernel.macho"
+args = "-v serial=3"
+```
+
+`no boot entry found` is gone. Selecting the entry will still fail: the kernel,
+ADT and trust cache are not in the payload yet.
+
+### Package the image
+
+```powershell
+# 16 MiB FAT volume with EFI/UniXNU/unixnu.toml
+python peridot\tools\mkpayload.py peridot\out\payload.img
+
+# patch the DTB, then build kernel = gzip(BootShim + FD) + DTB
+python peridot\tools\dtbinitrd.py <stock.dtb> out.dtb 0x11000000 0x12000000
+
+python Resources\Scripts\mkbootimg.py --kernel <kernel> --ramdisk <payload.img> `
+  --header_version 0 --pagesize 4096 -o Mu-peridot.img
+```
