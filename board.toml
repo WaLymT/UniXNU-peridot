@@ -68,22 +68,14 @@ title = "UniXNU (peridot)"
 # they do not fit (the panic blob alone is 0xa2f bytes). While locating the
 # handoff stall, keep the probe and drop the panic screen.
 panic_screen = false
-# The first handoff attempt stopped after the magenta band: the entry probe
-# proved the kernel ran with the MMU off and reached the point before MMU
-# enable, then nothing. A timed reset right after MMU enable distinguishes
-# "MMU enable hung" (no reset) from "hung later in platform init" (resets after
-# this many seconds).
-entry_probe_reset_delay = 6
-# Bisect the post-MMU stall one call at a time. Each run moves the probe one
-# call further along; a reset means that call returned. Current frontier: the
-# CPU topology parser, which stalls between its first ml_is_boot_cpu() call and
-# its return.
-entry_probe_reset_after = "_ml_parse_cpu_topology"
-entry_probe_reset_in = "_arm_init"
-# 12 GiB at 0x80000000, taken from the memory node in dts/peridot.dts.
-# The generator requires this to equal the DTS size cell exactly.
+# Bisection with the entry probe (a timed PSCI reset after a named call) put the
+# stall in the CPU topology parser; MAX_CPUS 8 / MAX_CPU_CLUSTERS 2 fixed it.
+# The probe now sits at the next frontier: arm_vm_init, which never returned
+# before that fix.
 dram_size = "0x80000000"
 kernel_args = ["-v", "debug=0x14e"]
+entry_probe_reset_delay = 6
+entry_probe_reset_after = "_kernel_startup_initialize_upto"
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated

@@ -101,3 +101,45 @@ fastboot boot probe.img
 ```
 
 判据：启动后 45 秒内 adb 是否重新出现（出现 = 自动重启过）。
+
+## 2026-10-28 续：找到并修复了两个上限
+
+`ml_parse_cpu_topology()` 里两个数组上限卡住了 8 核的 peridot：
+machine config `BCM2837` 声明 `MAX_CPUS 4` 和 `MAX_CPU_CLUSTERS 1`。
+
+| 现象 | 实际原因 |
+| --- | --- |
+| 1/2/3 个 CPU 通过，4 个失败 | 不是核数：cpu3 是第一个 **P** 核，`phys_cluster_id = 1` 越界 |
+| 8 个 CPU 全部失败 | `topology_info.cpus[]` 只有 4 项 |
+
+修复（都在设备仓 `patches/xnu/`）：
+
+1. `native-smp-secondary.patch`（UniXNU 自带，原本没进任何 series）：
+   `MAX_CPUS 4 -> 8`，并让 `start.s` 在 BCM2837 上按 Aff0+Aff1 取核号。
+2. `peridot-cpu-clusters.patch`（本板新增）：
+   `MAX_CPU_CLUSTERS 1 -> 2`，容纳 E 簇和 P 簇。
+
+配套：`dts/sm8635.dtsi` 的 CPU `reg` 改为单集群 0x0–0x7
+（`MAX_CPU_CLUSTERS` 很小时 MPIDR 的 Aff1 不能再当簇号用）。
+
+### 验证后的进度（真机、探针二分）
+
+```
+✅ ml_parse_cpu_topology     （MAX_CPUS 8 + MAX_CPU_CLUSTERS 2 之后通过）
+✅ arm_vm_init               （建初始页表；修复前完全到不了）
+✅ kernel_startup_initialize_upto（kprintf 机制初始化）
+❓ PE_init_printf            （下一步：通过后屏幕应能出字）
+```
+
+### 下一步
+
+探针放在 `_PE_init_printf` 之后没有触发，说明卡在
+`kernel_startup_initialize_upto` 与 `PE_init_printf` 之间那一小段（含
+`PE_create_console` 和串口探测）。这一段的输入是 `serial=` 启动参数和
+`PE_consistent_debug_inherit()`，是明天最先要看的地方。
+
+### 一个教训
+
+prelink 会跳过"可执行字节未变"的候选，而 `MAX_CPUS`/`MAX_CPU_CLUSTERS` 只改
+BSS 布局，所以改完这两个上限后 `kernel.macho` 不会自动更新——必须删掉它再跑
+`./unixnu kernel`，否则上机的还是旧内核。
