@@ -65,10 +65,9 @@ size_mib = 192
 loader = "firmware"
 title = "UniXNU (peridot)"
 panic_screen = true
-# TODO(verify): top of DRAM for a 12 GiB device at 0x80000000. The only
-# existing peridot reference (kvfsrl board.toml) uses 0x380000000; confirm
-# against the firmware memory map before trusting it.
-dram_size = "0x380000000"
+# 12 GiB at 0x80000000, taken from the memory node in dts/peridot.dts.
+# The generator requires this to equal the DTS size cell exactly.
+dram_size = "0x300000000"
 kernel_args = ["-v", "serial=3", "debug=0x14e", "boot-progress=2"]
 
 [payload.adt]
@@ -76,8 +75,8 @@ kernel_args = ["-v", "serial=3", "debug=0x14e", "boot-progress=2"]
 # platform (iPad7,1 / A10X). Keep it equal to ipsw.chip_id unless the ADT
 # tool needs the host SoC id instead.
 chip_id = "32785"
-# TODO(verify): same 12 GiB window as dram_size.
-owned_memory_size = "0x380000000"
+# Contiguous window DarwinBoot maps: 256 MiB to 8 GiB in 2 MiB steps.
+owned_memory_size = "0x100000000"
 # CPU MPIDR values read from the stock DTS: eight cores at 0x000..0x700.
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
