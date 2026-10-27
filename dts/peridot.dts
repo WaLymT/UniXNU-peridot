@@ -15,7 +15,7 @@
     // size cell needs the 64-bit form <0x3 0x00000000>.
     memory@80000000 {
         device_type = "memory";
-        reg = <0 0x80000000 0x3 0x00000000>;
+        reg = <0 0x80000000 0 0x80000000>;
     };
 
     reserved-memory {
