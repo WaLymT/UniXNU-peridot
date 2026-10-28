@@ -259,3 +259,36 @@ OS profile 的 `ipados.config`。两者不一致时会出现"编译引用了符�
 `logs/kernel-bootstrap.log` 是追加写的，多轮构建后里面的 `Undefined symbols`
 可能是**上一轮**的残留。判断要看最后一轮的结尾，或直接看 `unixnu` 自己的
 `== kernel: … sha256 …` 输出。
+
+### 2026-10-28 傍晚：卡点进入 IOKit 内部
+
+探针移进 `PE_init_iokit()`：
+
+| 探针 | 结果 |
+| --- | --- |
+| `_InitIOKit` 之后 | ❌ 不触发 |
+| `_pe_prepare_images` 之后 | 无法测试：该函数被内联，没有调用点 |
+
+`InitIOKit()` 的实现（`iokit/Kernel/IOStartIOKit.cpp:134`）：
+
+```c
+IOLibInit();
+OSlibkernInit();
+IOMachPortInitialize();
+gRootNub = new IOPlatformExpertDevice;
+bool ok = gRootNub->init(dtTop);        // dtTop = PE_state.deviceTreeHead
+```
+
+也就是说，**IOKit 的根设备就是用我们那份 ADT 建出来的**。ADT 里描述了什么设备，
+IOKit 就知道有什么；反过来，任何 IOKit 期待的节点/属性缺失，都可能在这里出问题。
+
+我们的 ADT（`kernel.macho.adt`，14.7 KB）目前只导出三个硬件节点：
+`gic`、`ufs`、`ufsphy`（靠 `unixnu,adt-name`）。其余是 `chosen`/`cpus`/`defaults`/`options`
+模板内容。
+
+### 下一步（明确）
+
+1. 用探针确认"是否到达 `InitIOKit`"（`reset_before`），区分是它内部卡住还是更早
+2. 若卡在 `gRootNub->init(dtTop)`，就要给 ADT 补齐 IOKit 需要的节点，
+   而不是继续在别处找问题
+3. 显示与存储驱动要尽早决定：它们是后面所有验证的前提
