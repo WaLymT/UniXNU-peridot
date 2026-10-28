@@ -1,16 +1,15 @@
 --- a/pexpert/gen/pe_gen.c
 +++ b/pexpert/gen/pe_gen.c
-@@ -131,11 +131,137 @@
+@@ -131,11 +131,129 @@
  
  extern void console_write_char(char);
  
 +/*
 + * peridot: minimal frame buffer console.
 + *
-+ * There is no serial port and no display driver yet, so kprintf has nowhere to
-+ * go. This draws 5x12 glyphs from Mu-Silicium's font straight into the GOP
-+ * frame buffer that DarwinBoot passes in the boot args; PE_state.video is
-+ * filled from those args in pe_identify_machine, before this runs.
++ * No serial port and no display driver yet, so kprintf has nowhere to go. This
++ * draws Mu-Silicium's 5x12 glyphs into the GOP frame buffer described by
++ * PE_state.video, which pe_identify_machine fills from the boot args.
 + */
 +extern void *ml_io_map(vm_offset_t pa, vm_size_t size);
 +
@@ -51,14 +50,6 @@
 +
 +#define PERIDOT_FB_SCALE 2
 +
-+static void
-+peridot_fb_scroll(void)
-+{
-+	if (peridot_fb_y + 14 * PERIDOT_FB_SCALE >= peridot_fb_height) {
-+		peridot_fb_y = 0;
-+	}
-+}
-+
 +void
 +peridot_fb_putc(char c)
 +{
@@ -89,8 +80,7 @@
 +	if (c == '\n') {
 +		peridot_fb_x = 0;
 +		peridot_fb_y += 14 * PERIDOT_FB_SCALE;
-+		peridot_fb_scroll();
-+		return;
++		goto scroll;
 +	}
 +	if (c < 32 || c > 127) {
 +		c = '?';
@@ -126,39 +116,43 @@
 +	if (peridot_fb_x + cw >= peridot_fb_width) {
 +		peridot_fb_x = 0;
 +		peridot_fb_y += 14 * PERIDOT_FB_SCALE;
-+		peridot_fb_scroll();
++	}
++scroll:
++	if (peridot_fb_y + 14 * PERIDOT_FB_SCALE >= peridot_fb_height) {
++		peridot_fb_y = 0;
 +	}
 +}
-+
  void
  PE_init_printf(boolean_t vm_initialized)
  {
  	if (!vm_initialized) {
 -		PE_putc = console_write_char;
-+		PE_putc = peridot_fb_putc;   /* peridot: draw on the GOP frame buffer */
++		PE_putc = peridot_fb_putc;
  	} else {
  		/* peridot: no video console yet; vcattach() would stall here */
  	}
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -251,7 +251,7 @@
+@@ -251,6 +251,9 @@
  static inline void
  _cnputc(char c, bool poll)
  {
--	bool in_debugger = (kernel_debugger_entry_count > 0);
++	/* peridot: draw on the GOP frame buffer */
++	extern void peridot_fb_putc(char c);
 +	peridot_fb_putc(c);
+ 	bool in_debugger = (kernel_debugger_entry_count > 0);
  	const uint32_t idx = get_cons_ops_index();
  
- 	poll = poll || in_debugger;
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -1247,7 +1247,8 @@
+@@ -1247,6 +1247,10 @@
  void
  vcputc(char c)
  {
--	vcputc_options(c, false);
++	/* peridot: draw and return; vcputc_lock is uninitialised */
++	extern void peridot_fb_putc(char c);
 +	peridot_fb_putc(c);
 +	return;
+ 	vcputc_options(c, false);
  }
  
- /*
