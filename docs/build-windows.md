@@ -94,30 +94,53 @@ Output: `Build/peridotPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd` (3 MiB).
 Package it for the device with header v0 and page size 4096 — see
 [UEFI bring-up](uefi-bringup.md).
 
-## 构建树的恢复（重要，踩过一次坑）
+## 构建树：`link.filelist` 和 bootstrap pass
 
-**不要 `rm -rf build/xnu`，也不要 `rm -rf <tree>`。**
-
-`unixnu kernel` 的流水线是这样排的：
-
-```
-渲染树 → 应用补丁 → archive-01..08（需要 link.filelist）
-       → 内核编译+链接（产生 link.filelist）
-```
-
-`link.filelist` 由内核链接阶段写在
-`tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/link.filelist`，
-而归档步骤排在链接**之前**、却要读它。也就是说这个文件必须**从上一次成功的构建里留下来**。
-
-一旦删掉，就会陷入：
+**教训**：删掉 `build/xnu` 之后，构建会一直停在
 
 ```
 No XNU symbol names: run a kernel pass first (it writes link.filelist)
 ```
 
-而且重跑无法自愈（每次都卡在同一处），删整棵树也一样——因为新树同样没有这个文件。
+我一开始把它写成"无法恢复"，**那是错的**——查 `scripts/unixnu/kernel.py` 就知道，
+这个项目从零构建时本来就要走一条专门的路径。
 
-**恢复办法**：保留 `out/` 下除 `build/` 之外的一切，只让 unixnu 重新走完整流水线；
-如果已经删了，只能等一次真正干净的 `out/peridot/` 重建（会重新下载 IPSW，比较慢）。
+### 它实际怎么工作
 
-换句话说：**改补丁可以，清缓存不行。** 构建慢一点远比重建树安全。
+```python
+# scripts/unixnu/kernel.py
+record = tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json
+if not record.is_file():
+    # 新树：先跑一个 pass，让它链接时不带归档，只留下编译记录和 link.filelist
+    try:
+        run(build-xnu-4k-baseline.sh, XNU_BOOTSTRAP=1)
+    except Error:
+        if not record.is_file():
+            raise              # 注意：记录存在时，这个失败会被吞掉
+build_archives(...)            # 归档步骤要读 link.filelist
+run(build-xnu-4k-baseline.sh)  # 真正的构建
+```
+
+- `startup.o.json` 由**编译阶段**写下，`link.filelist` 由**链接阶段**写下。
+- 只要 `startup.o.json` 存在，bootstrap pass 失败就不会报错。
+- 于是"编译完了、链接没跑"会静默通过，接着归档步骤才报缺少 `link.filelist`。
+
+### 所以真正的坑是"打断"，不是"删除"
+
+反复 `job_kill` 掉正在跑的 bootstrap pass，正好把它停在"编译已写记录、链接还没来得及写 filelist"
+的位置，从此每次都走"记录已存在 → 跳过 bootstrap pass → 归档失败"。
+
+### 恢复办法
+
+```sh
+rm <tree>/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json
+./unixnu kernel -D ../UniXNU-peridot
+```
+
+删掉编译记录，bootstrap pass 会重新跑；这次**不要中途打断**，让它跑到链接，
+`link.filelist` 就会重新生成，后续的归档步骤和新内核都能继续。
+
+换句话说：
+- 改补丁 → 可以（会重渲染树，但 `.cache` 与 `build` 通常保留，慢一点而已）
+- 清 `build/xnu` → 会触发上面的重跑，可以接受，但**必须让它跑完**
+- 中途 kill 构建 → 最危险，会制造这种"半成品记录"状态
