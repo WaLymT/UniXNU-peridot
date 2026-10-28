@@ -190,3 +190,44 @@ BSS 布局，所以改完这两个上限后 `kernel.macho` 不会自动更新—
 `xnu_env()` 只从 **device defconfig** 导出 `XNU_*` 变量给构建脚本，而内核**编译**用的是
 OS profile 的 `ipados.config`。两者不一致时会出现"编译引用了符号、链接却没带归档"。
 本板已在 `configs/peridot_defconfig` 显式写 `CONFIG_XNU_SOURCE_MOCKFS=y` 对齐。
+
+## 2026-10-28 下午续：引导线程逐段验证到 IOKit
+
+补丁 `peridot-defer-console.patch` 让 `PE_create_console()` 和 `PE_init_printf()` 直接返回，
+之后用探针（`--in _kernel_bootstrap_thread`）逐段推进，全部通过：
+
+```
+✅ idle_thread_create
+✅ sched_startup
+✅ clock_service_create
+✅ device_service_create
+✅ bootprofile_init（以及其间的 phys_carveout_init / kdp_init / hv_support_init）
+❌ PE_init_iokit
+❌ bsd_init（未到）
+```
+
+**结论：内核的启动路径到 IOKit 初始化为止是完好的**，卡在 `PE_init_iokit()` 内部。
+
+### 重要提醒：这个卡点可能是我们自己造成的
+
+`PE_init_iokit()` 的第一行就是 `PE_init_printf(TRUE);`——正是被 deferral 补丁改成
+直接返回的那个函数。之后它立刻 `printf("iBoot version: ...")`。如果 `PE_putc`
+因为跳过了初始化而未被设置，这里的 printf 就可能踩空。
+
+所以下一步**不要直接去查 IOKit 的设备树**，先验证这一点：
+
+1. 把 `PE_init_printf` 的提前返回改成"只跳过视频部分、仍然设置 `PE_putc`"，
+   或者在 deferral 里给 `PE_putc` 一个哑函数
+2. 再测 `PE_init_iokit` 之后是否通过
+
+只有排除掉这个次生因素，才能确定 IOKit 本身是否有问题。
+
+### 待办（按优先级）
+
+| 事项 | 目的 |
+| --- | --- |
+| 修 deferral 里的 `PE_putc` | 排除 printf 踩空，避免误判 |
+| 探针切进 `PE_init_iokit` 内部（`pe_prepare_images`、`DTInit`…） | 定位真正的卡点 |
+| ADT 补设备节点 | IOKit 需要从 ADT 建出设备树 |
+| UFS 驱动 | 没有根设备，`bsd_init` 之后必然停住 |
+| 显示驱动 | 没有控制台，一切只能靠探针 |
