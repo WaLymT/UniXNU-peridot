@@ -4,21 +4,20 @@
  void
  PE_create_console(void)
  {
-+	/* peridot: no display driver yet. The video-backed console stalls on the
-+	 * absent display state; remove this once GopFramebuffer is wired up. */
++	/* peridot: no display driver yet. PE_initialize_console() stalls on the
++	 * absent video state; remove this once GopFramebuffer is wired up. */
 +	return;
  	/*
  	 * Check the head of VRAM for a panic log saved on last panic.
  	 * Do this before the VRAM is trashed.
 --- a/pexpert/gen/pe_gen.c
 +++ b/pexpert/gen/pe_gen.c
-@@ -134,6 +134,9 @@
- void
- PE_init_printf(boolean_t vm_initialized)
- {
-+	/* peridot: no display driver yet. The video-backed console stalls on the
-+	 * absent display state; remove this once GopFramebuffer is wired up. */
-+	return;
+@@ -137,7 +137,7 @@
  	if (!vm_initialized) {
  		PE_putc = console_write_char;
  	} else {
+-		vcattach();
++		/* peridot: no video console yet; vcattach() would stall here */
+ 	}
+ }
+ 

@@ -31,3 +31,8 @@ CONFIG_XNU_ARMVIRT_PLATFORM=n
 # file, so without this line the build script never links the fixture archive
 # and the kernel fails to link with three undefined mockfs symbols.
 CONFIG_XNU_SOURCE_MOCKFS=y
+
+# peridot has no storage driver, so the offline root fixture is dead weight and
+# its archive does not reach the link line in this configuration. Last line wins,
+# so this overrides the =y above.
+# CONFIG_XNU_SOURCE_MOCKFS is not set

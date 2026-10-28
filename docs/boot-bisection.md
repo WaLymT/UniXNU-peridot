@@ -231,3 +231,31 @@ OS profile 的 `ipados.config`。两者不一致时会出现"编译引用了符�
 | ADT 补设备节点 | IOKit 需要从 ADT 建出设备树 |
 | UFS 驱动 | 没有根设备，`bsd_init` 之后必然停住 |
 | 显示驱动 | 没有控制台，一切只能靠探针 |
+
+### 2026-10-28 傍晚：排除"自伤"可能，IOKit 是真的卡点
+
+补丁改进版（`peridot-defer-console.patch` 第二版）：
+
+- `PE_create_console()` 仍然直接返回（视频控制台创建会死锁）
+- `PE_init_printf()` 只跳过 `vcattach()`，**保留 `PE_putc = console_write_char`**
+  ——这样后续 `printf` 不会踩空
+
+用改进版重建后，探针在 `_PE_init_iokit` 之后**仍然不触发**。
+
+结论：**不是我们的控制台补丁造成的**，`PE_init_iokit()` 内部确实卡住。
+下一步要在它内部继续二分（`pe_prepare_images`、`DTInit`、registry 构建…）。
+
+### 顺带解决：mockfs 链接问题
+
+`CONFIG_XNU_SOURCE_MOCKFS` 在 profile 里是 `y`，导致 `vfs_conf.o` 引用三个 mockfs 符号；
+而链接行没有带上 fixture 归档。在 `peridot_defconfig` **末尾**追加
+`# CONFIG_XNU_SOURCE_MOCKFS is not set`（解析器后出现的行优先）之后，编译不再引用
+这些符号，链接通过，`kernel.macho` sha256 `ab195a7f…`。
+
+本板没有存储驱动，离线根镜像本来也用不上。
+
+### 注意：构建日志会累积
+
+`logs/kernel-bootstrap.log` 是追加写的，多轮构建后里面的 `Undefined symbols`
+可能是**上一轮**的残留。判断要看最后一轮的结尾，或直接看 `unixnu` 自己的
+`== kernel: … sha256 …` 输出。

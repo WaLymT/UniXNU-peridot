@@ -69,7 +69,7 @@ title = "UniXNU (peridot)"
 # handoff stall, keep the probe and drop the panic screen.
 panic_screen = false
 entry_probe_reset_delay = 6
-entry_probe_reset_after = "_bootprofile_init"
+entry_probe_reset_after = "_PE_init_iokit"
 entry_probe_reset_in = "_kernel_bootstrap_thread"
 entry_probe_reset_before = false
 # Bisection with the entry probe (a timed PSCI reset after a named call) put the
