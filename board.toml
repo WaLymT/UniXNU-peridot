@@ -73,9 +73,9 @@ panic_screen = false
 # The probe now sits at the next frontier: arm_vm_init, which never returned
 # before that fix.
 dram_size = "0x80000000"
-kernel_args = ["-v", "debug=0x14e"]
+kernel_args = ["-v"]
 entry_probe_reset_delay = 6
-entry_probe_reset_after = "_kernel_startup_initialize_upto"
+entry_probe_reset_after = "_kprintf"
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated

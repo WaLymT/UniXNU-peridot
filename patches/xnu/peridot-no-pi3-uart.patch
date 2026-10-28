@@ -1,0 +1,13 @@
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -21,7 +21,9 @@
+ 
+ #ifndef ASSEMBLER
+ 
+-#define PI3_UART
++/* peridot has no BCM2837 MiniUART: registering it makes serial_exists true and
++ * the first kprintf writes to an address that does not exist on this SoC. */
++#undef PI3_UART
+ 
+ #define PI3_BREAK                               asm volatile("brk #0");
+ 
