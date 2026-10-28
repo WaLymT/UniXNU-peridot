@@ -69,9 +69,9 @@ title = "UniXNU (peridot)"
 # handoff stall, keep the probe and drop the panic screen.
 panic_screen = false
 entry_probe_reset_delay = 6
-entry_probe_reset_after = "_InitIOKit"
-entry_probe_reset_in = "_PE_init_iokit"
-entry_probe_reset_before = true
+entry_probe_reset_after = "_IOMachPortInitialize"
+entry_probe_reset_in = "_InitIOKit"
+entry_probe_reset_before = false
 # Bisection with the entry probe (a timed PSCI reset after a named call) put the
 # stall in the CPU topology parser; MAX_CPUS 8 / MAX_CPU_CLUSTERS 2 fixed it.
 # The probe now sits at the next frontier: arm_vm_init, which never returned
