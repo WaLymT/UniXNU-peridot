@@ -145,14 +145,42 @@
  
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -1247,6 +1247,10 @@
+@@ -1230,6 +1230,11 @@
+ void
+ vcputc_options(char c, __unused bool poll)
+ {
++	/* peridot: draw on the GOP frame buffer and stop; vcputc_lock has */
++	/* no lock group until vcinit() runs.                              */
++	extern void peridot_fb_putc(char c);
++	peridot_fb_putc(c);
++	return;
+ 	if (gc_initialized && gc_enabled) {
+ 		VCPUTC_LOCK_LOCK();
+ 		if (gc_enabled) {
+@@ -1247,6 +1252,9 @@
  void
  vcputc(char c)
  {
-+	/* peridot: draw and return; vcputc_lock is uninitialised */
 +	extern void peridot_fb_putc(char c);
 +	peridot_fb_putc(c);
 +	return;
  	vcputc_options(c, false);
  }
+ 
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -160,12 +160,12 @@
+ 
+ #define VCPUTC_LOCK_LOCK()                              \
+ MACRO_BEGIN                                             \
+-	lck_ticket_lock(&vcputc_lock, &vconsole_lck_grp);   \
++	/* peridot: vconsole_lck_grp is not initialised yet */
+ MACRO_END
+ 
+ #define VCPUTC_LOCK_UNLOCK()                            \
+ MACRO_BEGIN                                             \
+-	lck_ticket_unlock(&vcputc_lock);                    \
++	/* peridot: paired with the no-op above */
+ MACRO_END
+ 
  
