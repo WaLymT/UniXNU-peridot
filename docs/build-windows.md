@@ -93,3 +93,31 @@ Output: `Build/peridotPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd` (3 MiB).
 
 Package it for the device with header v0 and page size 4096 — see
 [UEFI bring-up](uefi-bringup.md).
+
+## 构建树的恢复（重要，踩过一次坑）
+
+**不要 `rm -rf build/xnu`，也不要 `rm -rf <tree>`。**
+
+`unixnu kernel` 的流水线是这样排的：
+
+```
+渲染树 → 应用补丁 → archive-01..08（需要 link.filelist）
+       → 内核编译+链接（产生 link.filelist）
+```
+
+`link.filelist` 由内核链接阶段写在
+`tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/link.filelist`，
+而归档步骤排在链接**之前**、却要读它。也就是说这个文件必须**从上一次成功的构建里留下来**。
+
+一旦删掉，就会陷入：
+
+```
+No XNU symbol names: run a kernel pass first (it writes link.filelist)
+```
+
+而且重跑无法自愈（每次都卡在同一处），删整棵树也一样——因为新树同样没有这个文件。
+
+**恢复办法**：保留 `out/` 下除 `build/` 之外的一切，只让 unixnu 重新走完整流水线；
+如果已经删了，只能等一次真正干净的 `out/peridot/` 重建（会重新下载 IPSW，比较慢）。
+
+换句话说：**改补丁可以，清缓存不行。** 构建慢一点远比重建树安全。
