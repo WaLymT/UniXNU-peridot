@@ -325,3 +325,72 @@ IOKit 就知道有什么；反过来，任何 IOKit 期待的节点/属性缺失
 2. 或者优先打通显示：`GopFramebuffer` 的归档构建缺失需要补，
    一旦有屏幕控制台，后面所有问题都能自己打印出来
 3. ADT 补节点：`gRootNub->init(dtTop)` 消费的就是它
+
+## 2026-10-28 晚：自己写帧缓冲控制台，内核终于能说话了
+
+### 做了什么
+
+UniXNU 的 `GopFramebuffer` 组件在这个版本不可用（见下），所以自己写了一个最小控制台
+（`peridot-fb-console.patch`）：
+
+- 在 `pexpert/gen/pe_gen.c` 里加一个 `peridot_fb_putc()`：用 Mu-Silicium 的
+  96 个 5x12 字模，画进 `PE_state.video` 描述的 GOP 帧缓冲（`ml_io_map` 映射）
+- `PE_init_printf()` 里 `PE_putc` 指向它
+- 同时钩住内核真正用于打印的两个出口：`_cnputc()`（串口路径）和 `vcputc()`（视频路径），
+  后者直接 `return`——因为它的锁组 `vcputc_lock` 只在 `vcinit()` 里初始化，而我们跳过了
+  `PE_create_console()`
+
+**结果：内核的 panic 和日志能直接打在屏幕上了。**
+
+### 拿到的一手证据
+
+第一次跑，屏幕上完整打出：
+
+```
+panic(cpu 0 caller 0xfffffff0079da2e0): Kernel data abort.
+  at pc 0xfffffff0078e5a54, lr 0xfffffff0078e3d38
+  far: 0x0000000000000000   esr: 0x96000005
+```
+
+`far = 0` → 空指针解引用。符号化结果：
+
+```
+pc -> IODTGetICellCounts()      (被 IODTFindInterruptParent 返回 NULL 后直接解引用)
+lr -> IODTMapInterruptsSharing()
+```
+
+### 修复与下一个问题
+
+加上 `peridot-iodt-guard.patch`（找不到中断父节点时打印并跳过，不再 panic）之后：
+
+```
+ufshc: error mapping interrupt[0]          ← 守卫打出来的，说明 ufshc 的中断父节点没解析到
+IONVRAM: NVRAM size is 8192 bytes
+lockdown_mode: lockdown mode in nvram is off
+panic(cpu 0 ...): Invalid ticket lock 0xfffffff007af0e08 @lock_ticket.c:134
+```
+
+锁地址符号化 = **`_vcputc_lock`**：`vcputc()` 用了未初始化的锁组。
+这正是上面那个 "直接 return" 要解决的问题——第二版补丁已经这么改了，
+但**卡在网络上没能重新编译验证**。
+
+### 两个待办（下次直接做）
+
+1. **重新编译**（`peridot-fb-console.patch` 第二版已生成、格式已校验）
+
+2. **`ufshc` 的中断父节点为什么解析不到**
+   ADT 里其实有 `intc`（`#interrupt-cells=4`、`phandle=1`）和
+   `ufshc`（`interrupt-parent=<1>`）。`FindPHandle(1)` 却没找到 → 怀疑 ADT 生成器
+   写出的 phandle 与 `interrupt-parent` 的宽度/类型不一致，或者注册表里没有把
+   `phandle` 属性登记进 `gIODTPHandles` 表。有控制台之后，下一步可以在
+   `FindPHandle` 里把整张表打印出来对比。
+
+### 环境障碍：GitHub 直连不稳
+
+`prepare-xnu-source.py` 每次构建都要从 `raw.githubusercontent.com` 取 DriverKit 头文件
+（xnu 里省略的那些）。已做的缓解：
+
+- `tools/dl/xnu-10063.121.3.tar.gz`（codeload 下载，稳定）
+- `/root/xnu-driverkit-seed` 存了 21 个头文件 + 2 个 API 清单
+- `peridot/tools/wsl-make-seed.sh` 建种子并给抓取函数打上"优先读本地"的补丁
+  （**注意**：构建树会重新生成脚本，这个补丁是否被树内的副本采纳还没验证成功）

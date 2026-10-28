@@ -5,3 +5,5 @@ native-smp-secondary.patch
 peridot-cpu-clusters.patch
 peridot-no-pi3-uart.patch
 peridot-defer-console.patch
+peridot-fb-console.patch
+peridot-iodt-guard.patch

@@ -1,0 +1,23 @@
+--- a/iokit/Kernel/IODeviceTreeSupport.cpp
++++ b/iokit/Kernel/IODeviceTreeSupport.cpp
+@@ -570,6 +570,10 @@
+ 		}
+ 		phandle = ((UInt32 *) data->getBytesNoCopy())[index];
+ 		parent = FindPHandle( phandle );
++		if (parent == NULL) {
++			kprintf("peridot: %s has interrupt-parent %u with no matching node\n",
++			    regEntry->getName(), phandle);
++		}
+ 	} else if (NULL == regEntry->getProperty( "interrupt-controller")) {
+ 		parent = regEntry->getParentEntry( gIODTPlane);
+ 	} else {
+@@ -630,6 +634,9 @@
+ 	bool                        cmp, ok = false;
+ 
+ 	parent = IODTFindInterruptParent( regEntry, index );
++	if (parent == NULL) {
++		return 0;
++	}
+ 	IODTGetICellCounts( parent, &icells, &acells );
+ 	addrCmp = NULL;
+ 	if (acells) {

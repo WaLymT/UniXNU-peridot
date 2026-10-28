@@ -1,0 +1,164 @@
+--- a/pexpert/gen/pe_gen.c
++++ b/pexpert/gen/pe_gen.c
+@@ -131,11 +131,137 @@
+ 
+ extern void console_write_char(char);
+ 
++/*
++ * peridot: minimal frame buffer console.
++ *
++ * There is no serial port and no display driver yet, so kprintf has nowhere to
++ * go. This draws 5x12 glyphs from Mu-Silicium's font straight into the GOP
++ * frame buffer that DarwinBoot passes in the boot args; PE_state.video is
++ * filled from those args in pe_identify_machine, before this runs.
++ */
++extern void *ml_io_map(vm_offset_t pa, vm_size_t size);
++
++static const uint64_t peridot_font[96] = {
++	0x0000000000000000, 0x0842108000020084, 0x0005294000000000, 0x15F528000000295F,
++	0x1C52F88000023E94, 0x088556400004D542, 0x04528800000B2725, 0x0002108000000000,
++	0x0421108800821042, 0x1084108200221108, 0x0957548000000000, 0x3E42000000000084,
++	0x0000000000223000, 0x3E00000000000000, 0x0000000000471000, 0x0884420000008442,
++	0x2318A88000022A31, 0x08429880000F9084, 0x1108C5C0000F8444, 0x1C4443E000074610,
++	0x14A62100000423E9, 0x26D087E000074610, 0x1E10C5C000074631, 0x088443E000010844,
++	0x1D18C5C000074631, 0x3D18C5C000074610, 0x08E2000000471000, 0x08E2000000223000,
++	0x0222220000082082, 0x01F00000000003E0, 0x2082082000008888, 0x1108C5C000020084,
++	0x2B98C5C0000F05B5, 0x2318A8800008C63F, 0x1D2949E00007CA52, 0x0210C5C000074421,
++	0x252949E00007CA52, 0x1E1087E0000F8421, 0x1E1087E000008421, 0x0210C5C000074639,
++	0x3F18C6200008C631, 0x084211C000071084, 0x1084238000032508, 0x0654C6200008C525,
++	0x02108420000F8421, 0x2B5DC6200008C631, 0x2B59CE200008C739, 0x2318C5C000074631,
++	0x1F18C5E000008421, 0x2318C5C001075631, 0x1F18C5E00008C525, 0x1C10C5C000074610,
++	0x084213E000021084, 0x2318C62000074631, 0x1518C6200002114A, 0x2B18C620000556B5,
++	0x08A546200008C54A, 0x08A5462000021084, 0x088443E0000F8442, 0x0421084E00E10842,
++	0x0821042000084108, 0x1084210E00E42108, 0x0008A88000000000, 0x0000000001F00000,
++	0x0000010400000000, 0x20E00000000B663E, 0x22F084200007C631, 0x22E0000000074421,
++	0x23E84200000F4631, 0x22E000000007443F, 0x1E21498000010842, 0x22E000001D187A31,
++	0x26D084200008C631, 0x0860100000071084, 0x10C020000C94A108, 0x0A9084200008A4A3,
++	0x084210C000071084, 0x2AB000000008D6B5, 0x26D000000008C631, 0x22E0000000074631,
++	0x22F000000210BE31, 0x23E0000021087A31, 0x26D0000000008421, 0x22E0000000074506,
++	0x04F1080000064842, 0x23100000000B6631, 0x2310000000022951, 0x23100000000556B5,
++	0x151000000008A884, 0x231000001D185B31, 0x11F00000000F8444, 0x0642109801821084,
++	0x0842108000021084, 0x3042108300321084, 0x0004D64000000000, 0x0000000000000000,
++};
++
++static uint8_t  *peridot_fb;
++static uint32_t  peridot_fb_rowbytes;
++static uint32_t  peridot_fb_width;
++static uint32_t  peridot_fb_height;
++static uint32_t  peridot_fb_x;
++static uint32_t  peridot_fb_y;
++static boolean_t peridot_fb_ready;
++
++#define PERIDOT_FB_SCALE 2
++
++static void
++peridot_fb_scroll(void)
++{
++	if (peridot_fb_y + 14 * PERIDOT_FB_SCALE >= peridot_fb_height) {
++		peridot_fb_y = 0;
++	}
++}
++
++void
++peridot_fb_putc(char c)
++{
++	uint32_t row, col, dx, dy, px, py, data, cw = 6 * PERIDOT_FB_SCALE;
++	uint64_t glyph;
++	uint32_t top, bottom;
++
++	if (!peridot_fb_ready) {
++		if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_rowBytes == 0 ||
++		    PE_state.video.v_height == 0) {
++			return;
++		}
++		peridot_fb = (uint8_t *)ml_io_map(PE_state.video.v_baseAddr,
++		    PE_state.video.v_rowBytes * PE_state.video.v_height);
++		peridot_fb_rowbytes = (uint32_t)PE_state.video.v_rowBytes;
++		peridot_fb_width = (uint32_t)PE_state.video.v_width;
++		peridot_fb_height = (uint32_t)PE_state.video.v_height;
++		peridot_fb_ready = TRUE;
++		if (peridot_fb == NULL) {
++			return;
++		}
++	}
++
++	if (c == '\r') {
++		peridot_fb_x = 0;
++		return;
++	}
++	if (c == '\n') {
++		peridot_fb_x = 0;
++		peridot_fb_y += 14 * PERIDOT_FB_SCALE;
++		peridot_fb_scroll();
++		return;
++	}
++	if (c < 32 || c > 127) {
++		c = '?';
++	}
++
++	glyph = peridot_font[(uint8_t)c - 32];
++	top = (uint32_t)(glyph >> 32);
++	bottom = (uint32_t)glyph;
++	for (row = 0; row < 12; row++) {
++		data = (row < 6) ? (top >> (row * 5)) : (bottom >> ((row - 6) * 5));
++		for (col = 0; col < 5; col++) {
++			px = peridot_fb_x + col * PERIDOT_FB_SCALE;
++			for (dy = 0; dy < PERIDOT_FB_SCALE; dy++) {
++				py = peridot_fb_y + row * PERIDOT_FB_SCALE + dy;
++				if (py >= peridot_fb_height) {
++					continue;
++				}
++				for (dx = 0; dx < PERIDOT_FB_SCALE; dx++) {
++					uint32_t *p;
++					if (px + dx >= peridot_fb_width) {
++						continue;
++					}
++					p = (uint32_t *)(peridot_fb +
++					    (uint64_t)py * peridot_fb_rowbytes +
++					    (uint64_t)(px + dx) * 4);
++					*p = ((data >> col) & 1) ? 0xFFFFFFFFu : 0xFF000000u;
++				}
++			}
++		}
++	}
++
++	peridot_fb_x += cw;
++	if (peridot_fb_x + cw >= peridot_fb_width) {
++		peridot_fb_x = 0;
++		peridot_fb_y += 14 * PERIDOT_FB_SCALE;
++		peridot_fb_scroll();
++	}
++}
++
+ void
+ PE_init_printf(boolean_t vm_initialized)
+ {
+ 	if (!vm_initialized) {
+-		PE_putc = console_write_char;
++		PE_putc = peridot_fb_putc;   /* peridot: draw on the GOP frame buffer */
+ 	} else {
+ 		/* peridot: no video console yet; vcattach() would stall here */
+ 	}
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -251,7 +251,7 @@
+ static inline void
+ _cnputc(char c, bool poll)
+ {
+-	bool in_debugger = (kernel_debugger_entry_count > 0);
++	peridot_fb_putc(c);
+ 	const uint32_t idx = get_cons_ops_index();
+ 
+ 	poll = poll || in_debugger;
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1247,7 +1247,8 @@
+ void
+ vcputc(char c)
+ {
+-	vcputc_options(c, false);
++	peridot_fb_putc(c);
++	return;
+ }
+ 
+ /*
