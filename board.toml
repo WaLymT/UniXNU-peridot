@@ -74,8 +74,6 @@ panic_screen = false
 # before that fix.
 dram_size = "0x80000000"
 kernel_args = ["-v"]
-entry_probe_reset_delay = 6
-entry_probe_reset_after = "_kprintf"
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated

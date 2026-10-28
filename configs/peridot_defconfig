@@ -25,3 +25,9 @@
 # CONFIG_XNU_SHENG_PMGR is not set
 
 CONFIG_XNU_ARMVIRT_PLATFORM=n
+
+# The OS profile compiles xnu with CONFIG_XNU_SOURCE_MOCKFS=y, so vfs_conf.o
+# references the mockfs symbols. xnu_env() only exports XNU_* keys from THIS
+# file, so without this line the build script never links the fixture archive
+# and the kernel fails to link with three undefined mockfs symbols.
+CONFIG_XNU_SOURCE_MOCKFS=y

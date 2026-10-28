@@ -143,3 +143,50 @@ machine config `BCM2837` 声明 `MAX_CPUS 4` 和 `MAX_CPU_CLUSTERS 1`。
 prelink 会跳过"可执行字节未变"的候选，而 `MAX_CPUS`/`MAX_CPU_CLUSTERS` 只改
 BSS 布局，所以改完这两个上限后 `kernel.macho` 不会自动更新——必须删掉它再跑
 `./unixnu kernel`，否则上机的还是旧内核。
+
+## 2026-10-28 下午：控制台是最后一个启动期障碍
+
+### 结论
+
+用入口探针逐段验证，内核启动路径到 `machine_startup` 为止全部通过：
+
+```
+✅ kernel_startup_initialize_upto
+✅ kprintf("kprintf initialized")      第一句打印正常返回
+✅ PE_create_console                    需 peridot-defer-console.patch
+✅ PE_init_printf                      同上
+✅ arm_vm_init                          建页表
+✅ ml_parse_cpu_topology                需 MAX_CPUS 8 + MAX_CPU_CLUSTERS 2
+✅ machine_startup                      进入 BSD 初始化（此调用不返回，探针不应触发）
+```
+
+`machine_startup` 是 `_arm_init` 的最后一句，之后内核作为主线程运行 `kernel_bootstrap` →
+`bsd_init`。**启动期的初始化链已经走通**，剩下的工作属于驱动层。
+
+### 控制台为什么必须延后
+
+`PE_create_console()` → `PE_initialize_console()` 需要有效的 `PE_state.video`，
+而 peridot 还没有显示驱动，于是在里面挂死。`peridot-defer-console.patch` 让它和
+`PE_init_printf()` 直接返回，代价是内核暂时没有输出通道（探针仍可用）。
+
+真正的显示要等 `GopFramebuffer` 组件——注意它的
+`build/native-legacy-display/libNativeLegacyDisplay.late.a` 在当前 UniXNU 版本里
+**只被引用、没有构建步骤**，所以 `CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y` 目前必然失败。
+
+### 下一步：驱动层
+
+内核已经到 BSD 初始化，接下来卡点不再是启动流程，而是：
+
+| 缺少的驱动 | 影响 |
+| --- | --- |
+| UFS（cliffs PHY + MCQ） | 没有根设备，`bsd_init` 最终会因拿不到 root 而 panic |
+| 显示（GopFramebuffer） | 没有控制台，内核与 panic 都不可见 |
+| 输入 | 无法交互 |
+
+这三个都在 `board.toml` 的组件列表和 `porting.toml` 的待办里。
+
+### 记录一个环境事实
+
+`xnu_env()` 只从 **device defconfig** 导出 `XNU_*` 变量给构建脚本，而内核**编译**用的是
+OS profile 的 `ipados.config`。两者不一致时会出现"编译引用了符号、链接却没带归档"。
+本板已在 `configs/peridot_defconfig` 显式写 `CONFIG_XNU_SOURCE_MOCKFS=y` 对齐。
