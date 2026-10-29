@@ -84,7 +84,9 @@ evidence = []
 
 [[area]]
 id = "storage"
-status = "in-progress"
+# Still planned: the transport compiles but the kernel does not link yet, and
+# nothing has been read from the device through this driver.
+status = "planned"
 components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot"]
 paths = ["board.toml", "feeds.toml", "configs/peridot_defconfig", "drivers/ShengUfs", "dts/vendor/peridot-stock.dts"]
 inputs = ["UFS host at 0x1d84000 with size 0x3000, ICE at 0x1d88000, ICE hardware key manager at 0x1d90000, MCQ registers, PHY at 0x1d80000 and the apps SMMU stream 0x60."]
