@@ -35,7 +35,7 @@ extern const uint8_t verified_root_key[];
 #include "SmmuTakeover.h"
 
 // Bumped on every bring-up build so the screen names the binary that ran.
-#define NATIVE_UFS_BUILD_TAG 8
+#define NATIVE_UFS_BUILD_TAG 11
 
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
@@ -309,13 +309,6 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
   gRootDiagnostic.smmuId2 = read32 (smmu, 0x28);
   gRootDiagnostic.smmuSlot = plan.slot;
 
-  // Diagnostic: with the takeover switch on, report the plan before anything is
-  // written. A panic here proves the takeover branch was reached; silence on the
-  // device instead means the fault is earlier than the S2CR rewrite.
-  if (true) {
-    panic ("NATIVE_UFS tag=%u takeover=%u",
-           (unsigned)NATIVE_UFS_BUILD_TAG, nativeUfsTakeoverAllowed ? 1U : 0U);
-  }
   if (plan.error) {
     gRootDiagnostic.stage = "SMMU planning";
     gRootDiagnostic.result = static_cast<uint32_t> (kIOReturnNotReady);
@@ -338,8 +331,6 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
   gRootDiagnostic.smmuId2 = read32 (smmu, 0x28);
   gRootDiagnostic.cba2r = read32 (smmu, 0x1800 + 4 * bank);
   if (failure) {
-    gRootDiagnostic.stage = "SMMU readback";
-    gRootDiagnostic.result = static_cast<uint32_t> (kIOReturnNotReady);
     rootDiagnosticFailure (failure);
     panic ("NATIVE_UFS smmu: %s idx=%u bank=%u cba2r=%x", failure, index, bank,
            gRootDiagnostic.cba2r);
