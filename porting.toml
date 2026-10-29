@@ -98,8 +98,8 @@ limits = ["The kernel cannot link with CONFIG_XNU_NATIVE_UFS yet, so nothing has
 next_action = ["Write the UFS equivalent of build-virtio-mmio-bindings.py: audit refer/IOStorageFamily, bind IOBlockStorageDevice for NativeUfs, link the VerifiedRoot kit and provide boot_progress_poll, then re-enable CONFIG_XNU_NATIVE_UFS."]
 
 evidence = [
-  { kind = "host", reference = "drivers/ShengUfs + peridot_defconfig", result = "NativeUfs.cpp builds to a 473 KB object with 634 symbols and libShengUfs.a is produced; -force_load reaches the kernel link line." },
-  { kind = "host", reference = "kernel link with CONFIG_XNU_NATIVE_UFS=y", result = "The link fails on IOBlockStorageDevice (external IOStorageFamily kext), verified_root_key/policies (VerifiedRoot) and boot_progress_poll, so the option is back to unset and the tree still builds." },
+  { kind = "host", reference = "drivers/ShengUfs/NativeUfs.cpp", command = "cd /root/work/UniXNU && ./unixnu defconfig peridot_defconfig -D ../UniXNU-peridot && ./unixnu kernel -D ../UniXNU-peridot", revision = "2e767bc7aa14e0dfaec774cfe73d3180fcb74dfd", result = "NativeUfs.cpp builds to a 473 KB object with 634 symbols, libShengUfs.a is produced, and -force_load reaches the kernel link line." },
+  { kind = "host", reference = "configs/peridot_defconfig", command = "cd /root/work/UniXNU && UNIXNU_KERNELCACHE=$PWD/out/ipsw/21H461/kernelcache.decompressed ./unixnu kernel -D ../UniXNU-peridot", revision = "2e767bc7aa14e0dfaec774cfe73d3180fcb74dfd", result = "With CONFIG_XNU_NATIVE_UFS=y the link stops on IOBlockStorageDevice (external IOStorageFamily kext), verified_root_key/policies (VerifiedRoot) and boot_progress_poll; the option is back to unset so the tree still builds." },
   { kind = "source", reference = "dts/vendor/peridot-stock.dts", result = "ufshc@1d84000 with reg size 0x3000, iommus <&apps_smmu 0x60 0> and GCC clock-controller@100000: the three constants the SM8550 transport assumes all match." },
 ]
 
