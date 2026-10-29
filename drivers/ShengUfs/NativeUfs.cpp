@@ -35,7 +35,7 @@ extern const uint8_t verified_root_key[];
 #include "SmmuTakeover.h"
 
 // Bumped on every bring-up build so the screen names the binary that ran.
-#define NATIVE_UFS_BUILD_TAG 11
+#define NATIVE_UFS_BUILD_TAG 15
 
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
@@ -767,12 +767,13 @@ void NativeUfs::inspectSmmu (void)
       }
     }
   }
-  panic ("NATIVE_UFS smmu\n"
-         "scr0=%08x idr0=%08x idr1=%08x gfsr=%08x\n"
-         "nsmr=%u valid=%u types t0=%u t1=%u t2=%u\n"
-         "sid0x60 match=%x smr=%08x s2cr=%08x",
-         scr0, idr0, idr1, gfsr, count, valid, typeCount[0], typeCount[1], typeCount[2],
-         match, matchSmr, matchS2cr);
+  unsigned matched = (match == 0xffffU) ? 0U : (matchS2cr & 0xffU);
+  unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
+  uint32_t matchedCbar = read32 (smmu, 0x1000 + 4 * matched);
+  uint32_t matchedSctlr = read32 (smmu + (pages + matched) * 4096, 0);
+  (void)gfsr; (void)valid; (void)typeCount; (void)scr0; (void)matchSmr;
+  panic ("NATIVE_UFS bank=%u cbar=%x sctlr=%x idr1=%x",
+         matched, matchedCbar, matchedSctlr, idr1);
 }
 
 // Read-only context-bank survey (native-ufs-probe=8): CBAR/CBA2R in gr1 and SCTLR/TTBR0 in the

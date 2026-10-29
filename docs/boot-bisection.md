@@ -802,3 +802,32 @@ kprintf("NATIVE_UFS bank=%u cbar=%x sctlr=%x\n",
 
 控制台改成 4 倍字 + 清屏之后，**屏幕终于可以直接读数字**。
 今天下午多轮误判的根源就是字号太小 + 旧文字残留。这一条建议保持。
+
+## 2026-10-30 凌晨：AMFI 因缺 PMGR panic，UFS 探针被它盖住
+
+最后一次启动的 panic 不是 UFS，而是：
+
+```
+panic(cpu 0 caller 0x...): "AMFI::No PMGR?\n" @ConfigurationSettings.cpp:2235
+```
+
+这是 sheng 专有的依赖（仓库规则里明确禁止照搬 `CONFIG_XNU_SHENG_PMGR`）。
+peridot 没有那套 PMGR 节点，AMFI 一旦走到这条路径就拒绝继续。
+
+### 一个值得记录的推测
+
+早先的控制台版本能一路跑到 APFS，**没有** AMFI panic；而现在出现了。
+两者之间唯一的实质变化是：**UFS 块设备 personality（`NativeUfsBlock`）开始被启动了**。
+
+如果这个推测成立，那说明 **UFS 已经越过了 SMMU，进入了块设备发布阶段**——
+AMFI 正是因为看到了新的块设备才去走根验证，然后撞上缺 PMGR。
+
+下次要验证它，最直接的办法是在屏幕最上方找 `NATIVE_UFS root check` 那一行：
+如果它出现过，说明 SMMU 这一关其实已经过了。
+
+### 下次的两条并行线
+
+1. **UFS**：确认 `root check` 是否打印过；若打印过，直接看 `userdata` 的窗口值
+2. **AMFI**：peridot 需要一条"没有 PMGR 也能通过"的路径，否则块设备一出现就 panic
+
+这两条现在互相影响：UFS 越成功，AMFI 越早 panic。
