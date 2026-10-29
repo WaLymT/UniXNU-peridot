@@ -1,0 +1,15 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1221,7 +1221,11 @@
+ static void
+ gc_update_color(int color, boolean_t fore)
+ {
+-	assert(gc_ops.update_color);
++	if (gc_ops.update_color == NULL) {
++		/* peridot: reached without gc_initialize(); name the caller */
++		kprintf("peridot: gc_update_color from %p\n", __builtin_return_address(0));
++		return;
++	}
+ 
+ 	gc_color_code = COLOR_CODE_SET(gc_color_code, color, fore);
+ 	gc_ops.update_color(color, fore);

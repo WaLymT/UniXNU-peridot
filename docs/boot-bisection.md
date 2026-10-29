@@ -394,3 +394,70 @@ panic(cpu 0 ...): Invalid ticket lock 0xfffffff007af0e08 @lock_ticket.c:134
 - `/root/xnu-driverkit-seed` 存了 21 个头文件 + 2 个 API 清单
 - `peridot/tools/wsl-make-seed.sh` 建种子并给抓取函数打上"优先读本地"的补丁
   （**注意**：构建树会重新生成脚本，这个补丁是否被树内的副本采纳还没验证成功）
+
+## 2026-10-29 上午：越过 IOKit，进入 kext 加载
+
+### 先修的是构建，不是内核
+
+上一轮"构建树坏了"的判断是错的。真相：**`peridot-fb-console.patch` 里把锁宏改坏了**。
+
+`VCPUTC_LOCK_LOCK()` 这类宏靠行尾反斜杠续行，我替换掉那行时丢了 `\`，
+`MACRO_END`（展开成 `} while (0)`）就落到宏外面：
+
+```
+video_console.c:164:1: error: extraneous closing brace ('}')
+video_console.c:164:1: error: while loop outside of a function
+```
+
+`video_console.o` 编不出来 → 没有链接 → 没有 `link.filelist` → 归档步骤报
+`No XNU symbol names`。而 `kernel.py:178-182` 的 `except Error: if not record.is_file(): raise`
+会把这个失败吞掉（编译已经写了 `startup.o.json`），所以看起来像"树无法恢复"。
+
+教训：**`startup.o.json` 存在不代表编译成功**，只代表编译开始过。
+
+### 另外修掉的两个环境问题
+
+- `prelink` 里写的是 `ipsw.kernelcache(ctx, ipsw.Ipsw(ctx))`——参数先求值，
+  所以即使 `out/ipsw/<build>/kernelcache.decompressed` 已在本地，`Ipsw()` 也会联网。
+  绕法：`UNIXNU_KERNELCACHE=<绝对路径> ./unixnu kernel`
+- `prepare-xnu-source.py` 需要三份清单（DriverKit、DriverKit/crypto、**TrustCache**），
+  种子目录按 URL 的 basename 匹配，所以第三份必须存成名为 `TrustCache` 的文件
+
+### 真机结果
+
+| 探针/版本 | 屏幕 |
+| --- | --- |
+| 锁宏修好（`4154a454`） | `Invalid ticket lock` 消失；新 panic：`video_console.c:1222 Assertion failed: gc_ops.update_color` |
+| 加 `peridot-vc-guard.patch`（`c636bc6f`） | **不再 panic**，一路走到 kext 加载 |
+
+最后几行（真机拍照）：
+
+```
+Darwin Image4 Validator Version 66.33.0
+Security policy loaded: AppleImage4 hooks
+dylib_limit: All the created dylib kext threads have been scheduled at least once
+apfs_module_start:332232: load: com.apple.filesystems.apfs, apfs-222036.114400.66
+```
+
+**停住的地方：APFS 模块启动**。没有存储驱动，就没有可挂载的根设备，这一步等不到结果。
+
+### 当前补丁序列（7 个）
+
+```
+native-smp-secondary.patch      MAX_CPUS 8
+peridot-cpu-clusters.patch      MAX_CPU_CLUSTERS 2
+peridot-no-pi3-uart.patch       去掉 PI3_UART
+peridot-defer-console.patch     推迟 PE_create_console / vcattach
+peridot-fb-console.patch        自写帧缓冲控制台 + 锁宏置空
+peridot-iodt-guard.patch        中断父节点找不到时打印并跳过
+peridot-vc-guard.patch          gc_update_color 未初始化时打印并返回
+```
+
+（`debug-*.patch` 三个早期打印脚手架已删除：它们对着旧源码生成、打不上了，
+控制台接管了这个职责。）
+
+### 下一步
+
+1. **UFS 驱动**（cliffs PHY + MCQ）——APFS 卡在这里就是因为没有块设备
+2. `ufshc` 的中断父节点为什么 `FindPHandle(1)` 找不到（ADT 里 phandle/宽度对不上？）
+3. 显示驱动（`GopFramebuffer` 两条路都编不过，详见 `docs/build-windows.md`）

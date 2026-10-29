@@ -174,13 +174,13 @@
  #define VCPUTC_LOCK_LOCK()                              \
  MACRO_BEGIN                                             \
 -	lck_ticket_lock(&vcputc_lock, &vconsole_lck_grp);   \
-+	/* peridot: vconsole_lck_grp is not initialised yet */
++	/* peridot: vconsole_lck_grp is not initialised yet */ \
  MACRO_END
  
  #define VCPUTC_LOCK_UNLOCK()                            \
  MACRO_BEGIN                                             \
 -	lck_ticket_unlock(&vcputc_lock);                    \
-+	/* peridot: paired with the no-op above */
++	/* peridot: paired with the no-op above */ \
  MACRO_END
  
  
