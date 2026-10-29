@@ -598,17 +598,30 @@ txs=0000000000000011  rxs=0000000000000011  aux=0000000000000011
 **六条 GCC UFS PHY 时钟分支全部是 0x11（使能位置位）**——`fastboot boot` 留下的
 UFS 链路是活的。这对整个存储方向是决定性的好消息：不需要自己配时钟和 PHY。
 
-### 但要警惕的一点
+### GCC 偏移：核对过了，cliffs 和 SM8550 一致
 
-同一段打印里：
+我一度怀疑那段打印里的 `gdsc=...` 值不像电源域寄存器，**那是我看错了照片**
+（把两行挤在一起的值当成了 GDSCR）。stock DTS 直接给出了答案：
 
 ```
-gdsc=ff22227ff890000  uniphy_gdsc=ff222222728b0000
+gcc_ufs_mem_phy_gdsc = "/soc/qcom,gdsc@19e000"      → GCC base 0x100000 + 0x9e000
+gcc_ufs_phy_gdsc     = "/soc/qcom,gdsc@177004"      → GCC base 0x100000 + 0x77000 + 0x4
 ```
 
-这些值**不像**电源域状态寄存器。SM8550 的 GCC 偏移（`GccUfs.h` 里的 `0x77000` 基址一族）
-在 cliffs 上很可能不成立。时钟分支的 `0x11` 可信（就是分支使能位），但 GDSC 必须重新核对
-——在纠正之前，**任何写操作都不要做**。
+与 `GccUfs.h` 里的 `0x77000`/`0x9e000` 完全一致。而且驱动的打印格式是 `%08x`，
+真正的判据是它自己算出来的 `hc_read`：
+
+```
+axi=00000011  ahb=00000011  unipro=00000011
+txsym=00000011 rxsym=00000011 aux=00000011
+hc_read=1 cap=... ver=...
+```
+
+**`hc_read=1` 说明控制器被成功读取**——驱动只有在"GDSC 已上电且总线时钟在跑"时才去读控制器。
+所以 cliffs 的电源域与时钟状态是满足传输条件的。
+
+教训：看照片里的十六进制值之前先确认打印格式（`%08x` 还是 `%p`），
+否则会把"两行挤在一起"读成"一个奇怪的值"。
 
 ### 下一步
 
@@ -616,3 +629,30 @@ gdsc=ff22227ff890000  uniphy_gdsc=ff222222728b0000
    GDSCR 偏移，替换 `GccUfs.h` 里 SM8550 的值
 2. 偏移纠正后跑 `native-ufs-probe=10`（只读：LUN 0 → GPT → userdata 窗口）
 3. 只有 GPT 读对之后，才去填 `board.toml` 的 `userdata.first_lba/last_lba`
+
+### probe=10：进到 SMMU 就停了，而且停得有道理
+
+`native-ufs-probe=10`（只读 GPT 校验）在真机上的结果：
+
+```
+panic(cpu 0 caller 0x...): NATIVE_UFS
+  smmu: conflicting UFS stream mapping slot=1 s2cr=0x00...
+```
+
+`planUfsSmmu`（`SmmuTakeover.h`）的规则是：扫 SMR 表，找到与 stream 0x60 匹配的项后，
+只有"唯一匹配、mask 为 0、且已经指向它保留的那个 context bank"才允许复用；
+否则一律报冲突并拒绝。peridot 上 **引导器已经给 UFS 装了映射**，指向它自己的 bank，
+于是 `ourBank` 为假 → 冲突。
+
+这不是 bug，是驱动在保护一条可能正在被引导器使用的映射。
+
+### 所以先看清，不要改写
+
+下一步是 `native-ufs-probe=7`（`inspectSmmu`，纯只读）：它把 SMMU 的
+`scr0/idr0/idr1/gfsr`、有效 SMR 数量、以及 **stream 0x60 那一项的 smr/s2cr 原样打印**。
+
+知道那张映射的类型（S2CR.TYPE：bypass / translate / fault）和 CBNDX 之后，才有依据选：
+
+- 若已经是 **bypass 或恒等映射**：说明引导器的映射正好能承载我们那块物理连续的 DMA，
+  驱动应当"采纳"而不是"接管"（跳过改写，直接用）
+- 若指向它自己的页表：必须显式重写，那是真正危险的操作，要先有它不在使用的证据
