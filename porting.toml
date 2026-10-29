@@ -97,7 +97,11 @@ completion = ["SCSI capacity, GPT and known blocks are correct, then the configu
 limits = ["The kernel cannot link with CONFIG_XNU_NATIVE_UFS yet, so nothing has been read from the device through this driver."]
 next_action = ["Write the UFS equivalent of build-virtio-mmio-bindings.py: audit refer/IOStorageFamily, bind IOBlockStorageDevice for NativeUfs, link the VerifiedRoot kit and provide boot_progress_poll, then re-enable CONFIG_XNU_NATIVE_UFS."]
 
-evidence = ["2026-10-29: libShengUfs.a builds (473 KB NativeUfs.o, 634 symbols) and -force_load reaches the link line; the link then fails on IOBlockStorageDevice, verified_root_key/policies and boot_progress_poll, so CONFIG_XNU_NATIVE_UFS was returned to unset to keep the tree building."]
+evidence = [
+  { kind = "host", reference = "drivers/ShengUfs + peridot_defconfig", result = "NativeUfs.cpp builds to a 473 KB object with 634 symbols and libShengUfs.a is produced; -force_load reaches the kernel link line." },
+  { kind = "host", reference = "kernel link with CONFIG_XNU_NATIVE_UFS=y", result = "The link fails on IOBlockStorageDevice (external IOStorageFamily kext), verified_root_key/policies (VerifiedRoot) and boot_progress_poll, so the option is back to unset and the tree still builds." },
+  { kind = "source", reference = "dts/vendor/peridot-stock.dts", result = "ufshc@1d84000 with reg size 0x3000, iommus <&apps_smmu 0x60 0> and GCC clock-controller@100000: the three constants the SM8550 transport assumes all match." },
+]
 
 [[area]]
 id = "display"
