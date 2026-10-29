@@ -43,9 +43,9 @@ static void rootDiagnosticFailure (const char *reason);
 
 // Gates the deliberate takeover of a firmware stream-match entry; set from
 // native-ufs-takeover in start(). C++ linkage: SmmuTakeover.h declares it so.
-// TEMPORARY bring-up switch: set at compile time because the
-// native-ufs-takeover boot argument did not reach start() on device.
-bool nativeUfsTakeoverAllowed = true;
+// Off by default: rewriting the firmware's stream-match entry stalls the
+// transport on this board (see docs/boot-bisection.md).
+bool nativeUfsTakeoverAllowed = false;
 
 extern "C" {
 // Optional passive observer; absent in ordinary builds. It may run while a

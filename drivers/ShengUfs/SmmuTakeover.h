@@ -64,7 +64,7 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
         // instead of refusing. The slot is kept; configureUfsSmmu rewrites its
         // S2CR to our bypass bank, so the firmware's translation stops being
         // used for this stream.
-        if (matches == 1 && !mask) {   // peridot: unconditional for this run
+        if (nativeUfsTakeoverAllowed && matches == 1 && !mask) {
           p.reuse = true; p.slot = i;
           continue;
         }
