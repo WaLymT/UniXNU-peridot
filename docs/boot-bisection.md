@@ -521,3 +521,36 @@ VirtioBlock 和 RamBlock 是靠 `build/*-bindings.py` 把这类引用**绑定到
 
 **当前 `CONFIG_XNU_NATIVE_UFS` 已改回未设置**，仓库保持可构建；
 驱动的 vendor 副本和 `probe()` 的改动都保留着，随时可以接着做。
+
+### 存储绑定：为什么这一步不能"顺手写个脚本"
+
+我试过直接照 `build-virtio-mmio-bindings.py` 写一份 UFS 版本，结论是**前置产物不存在**，
+而且不是补几个文件就能造出来的。查证过程：
+
+1. 绑定脚本要读 `build/storage-abi/interface-audit.json`，里面有原始
+   `IOBlockStorageDevice` 每个方法的 `candidate_target` 地址。**这个文件我们没有**
+2. 生成它的 `audit-storage-interface.py` 依赖 macOS 的 `xcrun dwarfdump`，
+   而且它的地址来自一份"合格的 sheng prelink 产物"
+   （`build/xnu-prelink/native-apfs-load-positive.macho`），那是 sheng 设备仓的构建产物
+3. 想绕开它、直接从原始 kernelcache 取地址也不行：
+   - `out/ipsw/21H461/kernelcache.decompressed` 里 8 个带符号表的 Mach-O，
+     **没有一个含 `IOBlockStorageDevice`**
+   - 我们自己 prelink 出来的 `out/kernel.macho`（50,639 个符号）同样没有
+     —— 因为 IOStorageFamily 是**运行时加载的 kext**，它的符号不在内核里
+
+也就是说：**地址只在"kext 被真正加载"时才确定**，而 UniXNU 的
+`native_prelink.plan()` 掌握这套映射。sheng 把它固化成了 audit JSON，peridot 还没有。
+
+### 两条可行路径（下次选一条）
+
+**A. 产出 peridot 自己的 audit**（对齐 UniXNU 的设计）
+- 让 `XnuPrelink` 的 plan 在 prelink 时导出 IOStorageFamily 的绑定表
+- 或者用 macOS 跑一次 `audit-storage-interface.py`，产出 `interface-audit.json`
+- 然后照 virtio 的模板写 `build-ufs-bindings.py`
+
+**B. 不用原始 kext，自己提供存储类**
+- 在树里放一个最小 `IOBlockStorageDevice` 兼容实现，让驱动链接到它
+- 语义不同（这个类变成我们的），bring-up 阶段可以接受，但要写清楚这不是原版
+
+两条都不小。**在写任何数据之前，必须先能只读地把 LUN 0 的 GPT 读对**——
+后面的 `userdata` 窗口（`board.toml` 里仍是 0/0）依赖这个结果。
