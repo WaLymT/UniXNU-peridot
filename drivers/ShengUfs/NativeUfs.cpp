@@ -34,13 +34,18 @@ extern const uint8_t verified_root_key[];
 #include "TransferPoll.h"
 #include "SmmuTakeover.h"
 
+// Bumped on every bring-up build so the screen names the binary that ran.
+#define NATIVE_UFS_BUILD_TAG 8
+
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
 static void rootDiagnosticFailure (const char *reason);
 
 // Gates the deliberate takeover of a firmware stream-match entry; set from
 // native-ufs-takeover in start(). C++ linkage: SmmuTakeover.h declares it so.
-bool nativeUfsTakeoverAllowed = false;
+// TEMPORARY bring-up switch: set at compile time because the
+// native-ufs-takeover boot argument did not reach start() on device.
+bool nativeUfsTakeoverAllowed = true;
 
 extern "C" {
 // Optional passive observer; absent in ordinary builds. It may run while a
@@ -303,6 +308,14 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
   gRootDiagnostic.smmuId1 = read32 (smmu, 0x24);
   gRootDiagnostic.smmuId2 = read32 (smmu, 0x28);
   gRootDiagnostic.smmuSlot = plan.slot;
+
+  // Diagnostic: with the takeover switch on, report the plan before anything is
+  // written. A panic here proves the takeover branch was reached; silence on the
+  // device instead means the fault is earlier than the S2CR rewrite.
+  if (true) {
+    panic ("NATIVE_UFS tag=%u takeover=%u",
+           (unsigned)NATIVE_UFS_BUILD_TAG, nativeUfsTakeoverAllowed ? 1U : 0U);
+  }
   if (plan.error) {
     gRootDiagnostic.stage = "SMMU planning";
     gRootDiagnostic.result = static_cast<uint32_t> (kIOReturnNotReady);
@@ -1747,9 +1760,15 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
   native_ufs_probe_requested = probe != 0;
+  kprintf ("NATIVE_UFS start tag=%u probe=%u takeover=%u\n",
+           (unsigned)NATIVE_UFS_BUILD_TAG, probe, nativeUfsTakeoverAllowed ? 1U : 0U);
   unsigned takeover = 0;
   PE_parse_boot_argn ("native-ufs-takeover", &takeover, sizeof (takeover));
-  nativeUfsTakeoverAllowed = takeover != 0;
+  // Only turn it on: an absent or unparsed argument must not clear a switch
+  // that was set at compile time for a bring-up experiment.
+  if (takeover != 0) {
+    nativeUfsTakeoverAllowed = true;
+  }
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
