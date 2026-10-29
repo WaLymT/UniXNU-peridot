@@ -13,16 +13,11 @@
 # register set.
 # Qualcomm UFS root transport (vendored under drivers/ShengUfs).
 #
-# The driver compiles and its archive builds, but the kernel does not link yet:
-# NativeUfsBlock imports IOBlockStorageDevice (from the external
-# com.apple.iokit.IOStorageFamily kext), verified_root_key/policies (VerifiedRoot)
-# and boot_progress_poll. VirtioBlock and RamBlock resolve the storage class
-# through build/*-bindings.py, which audits refer/IOStorageFamily and binds the
-# imports to the original kext; there is no equivalent step for UFS here yet.
-#
-# Re-enable once that binding step exists:
-# CONFIG_XNU_NATIVE_UFS=y
-# CONFIG_XNU_NATIVE_UFS is not set
+# The binding step now exists: scripts/build-ufs-bindings.py derives
+# IOBlockStorageDevice's addresses from this kernel's prelink and folds them into
+# libShengUfs.a (the archives list wires it after component:ShengUfs). Read the
+# note in that script before trusting a write path on this board.
+CONFIG_XNU_NATIVE_UFS=y
 
 # Display: enable together with the GopFramebuffer component.
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set

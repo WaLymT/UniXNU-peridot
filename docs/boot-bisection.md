@@ -554,3 +554,65 @@ VirtioBlock 和 RamBlock 是靠 `build/*-bindings.py` 把这类引用**绑定到
 
 两条都不小。**在写任何数据之前，必须先能只读地把 LUN 0 的 GPT 读对**——
 后面的 `userdata` 窗口（`board.toml` 里仍是 0/0）依赖这个结果。
+
+## 2026-10-29 下午：UFS 驱动第一次跑在设备上
+
+### 做了什么（路线 A：自己产出绑定表）
+
+sheng 的 `interface-audit.json` 里那些地址，peridot 拿不到：原始 kernelcache 剥离了 kext
+符号，我们自己的 prelinked kernel 里有 22,544 个导出却没有一个 IOStorageFamily 类符号。
+
+但 **`__ZTV9IOService` 是可用的**（`0xfffffff0071b9a80`）。派生类的 vtable 按 Itanium ABI
+就是父类同位置的那张表，另加自己的覆写——上游 audit 报告的形状正好是
+**190 槽 = 162 继承 + 14 覆写 + 14 纯虚陷阱**。
+
+于是 `scripts/build-ufs-bindings.py` 用结构特征找表：扫描 IOStorageFamily 的
+`__DATA_CONST` 区段，找 16 字节零前缀 + 190 指针满足上述分布，**只接受唯一解**：
+
+```
+dispatch table 0xfffffff005cb44d0: 162 parent slots, 14 overrides, 14 traps
+```
+
+四个锚点都做了模式校验，不是"找到就用"：
+
+| 锚点 | 值 | 校验 |
+| --- | --- | --- |
+| vtable | `0xfffffff005cb44d0` | 190 槽分布 |
+| 构造 | `0xfffffff00496ed98` | 存表 + 转发到 `IOService::IOService` |
+| 析构 | `0xfffffff00496edb8` | 转发到真正的 `IOService` D2 |
+| metaclass | `0xfffffff006add1d0` | getter 的 adrp/add 形态 |
+
+11 个导入全部绑定，折进 `libShengUfs.a`。`VerifiedRoot` 与 `boot_progress_poll` 用
+**失败即拒绝**的桩（`vr_open`/`vr_verify_block` 返回 -1、策略计数为 0），
+这只是为了链接，验证路径一律不通过——安全方向。
+
+### 真机结果
+
+`native-ufs-probe=2`（只读检查）在设备上跑通并打印：
+
+```
+axi=0000000000000011  ahb=0000000000000011  uniphy=0000000000000011
+txs=0000000000000011  rxs=0000000000000011  aux=0000000000000011
+```
+
+**六条 GCC UFS PHY 时钟分支全部是 0x11（使能位置位）**——`fastboot boot` 留下的
+UFS 链路是活的。这对整个存储方向是决定性的好消息：不需要自己配时钟和 PHY。
+
+### 但要警惕的一点
+
+同一段打印里：
+
+```
+gdsc=ff22227ff890000  uniphy_gdsc=ff222222728b0000
+```
+
+这些值**不像**电源域状态寄存器。SM8550 的 GCC 偏移（`GccUfs.h` 里的 `0x77000` 基址一族）
+在 cliffs 上很可能不成立。时钟分支的 `0x11` 可信（就是分支使能位），但 GDSC 必须重新核对
+——在纠正之前，**任何写操作都不要做**。
+
+### 下一步
+
+1. 从 stock DTS 的 `power-domain`/`gdsc` 引用或 cliffs 的 GCC 布局重新推导 UFS PHY 的
+   GDSCR 偏移，替换 `GccUfs.h` 里 SM8550 的值
+2. 偏移纠正后跑 `native-ufs-probe=10`（只读：LUN 0 → GPT → userdata 窗口）
+3. 只有 GPT 读对之后，才去填 `board.toml` 的 `userdata.first_lba/last_lba`

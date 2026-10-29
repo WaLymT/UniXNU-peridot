@@ -40,6 +40,7 @@ archives = [
   "build-libpthread-kernel.py",
   "component:VirtioMmioBlock",
   "component:ShengUfs",
+  "build-ufs-bindings.py",
 ]
 
 # [kernel.prelink] is inherited from the OS profile: the iPadOS 17.7.11
@@ -93,7 +94,7 @@ dram_size = "0x80000000"
 
 # power state and then only reads the controller, the SMMU and the request
 # lists, printing what firmware left behind. Nothing is written with this set.
-kernel_args = ["-v"]
+kernel_args = ["-v", "native-ufs-probe=2"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
