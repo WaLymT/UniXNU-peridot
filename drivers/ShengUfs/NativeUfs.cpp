@@ -316,6 +316,13 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
     rootDiagnosticFailure (plan.error);
     panic ("NATIVE_UFS smmu: %s slot=%u smr=%x s2cr=%x", plan.error, plan.slot, plan.smr, plan.s2cr);
   }
+  if (plan.adopt) {
+    // Nothing is written: the firmware's bank already passes physical addresses.
+    report[0] = plan.slot | (plan.bank << 16);
+    report[1] = read32 (smmu, 0x1000 + 4 * plan.bank);
+    report[2] = read32 (smmu + (plan.pages + plan.bank) * 4096, 0);
+    return;
+  }
   unsigned bank = plan.bank, index = plan.slot;
   uintptr_t cb = smmu + (plan.pages + bank) * 4096;
   const char *failure = configureUfsSmmu (plan, stream,

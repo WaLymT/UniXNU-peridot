@@ -765,3 +765,40 @@ payload 里的。结果刷进去的还是旧内核，屏幕"完全没变化"，�
 
 教训：`内核 → payload → boot image` 这条链目前靠人记。**应该写成一个脚本**
 （`wsl-cycle.sh`），一条命令走完并校验哈希，否则这类错误还会再犯。
+
+## 2026-10-29 收尾：只差 bank 17 的两个寄存器
+
+采纳（adopt）逻辑写好了：发现已有唯一匹配时，读**匹配项指向的那个 bank** 的
+`CBAR` 与 `SCTLR`，若 `SCTLR.M=0` 且 `CBAR.CBNDX` 自洽，就认为它是 bypass、
+直接用、不写任何寄存器。
+
+真机结果仍是：
+
+```
+smmu: conflicting UFS stream mapping slot=1 smr=0x80000060 s2cr=0x11
+```
+
+**说明判定没通过**——而原因很具体：普查（`probe=8`）只打印了
+`sctlr[0]`、`sctlr[1]`、`sctlr[last]`，**恰好没有 bank 17 的**。
+我用的判据需要它的 `SCTLR` 与 `CBAR`，拿不到就只能保守地报冲突。
+
+### 明天第一步（很小，且只读）
+
+把普查改成：从匹配项的 `s2cr` 取出 `CBNDX`，**只打印那个 bank 的 `CBAR` 与 `SCTLR`**。
+
+```c
+unsigned matched = s2cr & 0xff;           // 17
+kprintf("NATIVE_UFS bank=%u cbar=%x sctlr=%x\n",
+        matched, read32(smmu, 0x1000 + 4*matched),
+        read32(smmu + (pages + matched) * 4096, 0));
+```
+
+拿到这两个值，就能确定：
+
+- `SCTLR.M=0` → 确实是 bypass，adopt 条件放宽到只看 M 位即可通过
+- `SCTLR.M=1` → 是真实翻译，方案 B 需要往它的页表里加映射（工作量更大）
+
+### 今天的经验
+
+控制台改成 4 倍字 + 清屏之后，**屏幕终于可以直接读数字**。
+今天下午多轮误判的根源就是字号太小 + 旧文字残留。这一条建议保持。

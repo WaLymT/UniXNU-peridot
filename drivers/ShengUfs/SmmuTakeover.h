@@ -5,6 +5,7 @@ struct UfsSmmuPlan {
   uint32_t smr = 0, s2cr = 0;
   bool reuse = false;
   const char *error = nullptr;
+    bool adopt = false;   // use the firmware's existing bypass bank as-is
 };
 // ARM IHI 0062D.c sections 1.6 and 3.7: VA64=0 still rejects inputs above
 // 32 bits with SCTLR.M=0. With VA64=1 the bypass range is bounded by all
@@ -64,9 +65,21 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
         // instead of refusing. The slot is kept; configureUfsSmmu rewrites its
         // S2CR to our bypass bank, so the firmware's translation stops being
         // used for this stream.
-        if (nativeUfsTakeoverAllowed && matches == 1 && !mask) {
-          p.reuse = true; p.slot = i;
-          continue;
+        if (matches == 1 && !mask) {
+          // The firmware's entry targets some context bank. If that bank has
+          // stage 1 off (SCTLR.M=0) and a bypass CBAR, it already passes
+          // physical addresses and can be used unchanged.
+          unsigned existing = s2cr & 0xffU;
+          uint32_t cbBase = read ((p.pages + existing) * 4096);
+          uint32_t cbarExisting = read (0x1000 + 4 * existing);
+          if ((cbBase & 1U) == 0 && (cbarExisting & 0x3fU) == existing) {
+            p.adopt = true; p.reuse = true; p.slot = i; p.bank = existing;
+            continue;
+          }
+          if (nativeUfsTakeoverAllowed) {
+            p.reuse = true; p.slot = i;
+            continue;
+          }
         }
         p.slot = i; p.smr = smr; p.s2cr = s2cr;
         p.error = "conflicting UFS stream mapping"; return p;
