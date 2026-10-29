@@ -38,6 +38,10 @@ static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
 static void rootDiagnosticFailure (const char *reason);
 
+// Gates the deliberate takeover of a firmware stream-match entry; set from
+// native-ufs-takeover in start(). C++ linkage: SmmuTakeover.h declares it so.
+bool nativeUfsTakeoverAllowed = false;
+
 extern "C" {
 // Optional passive observer; absent in ordinary builds. It may run while a
 // window lock is held, so its contract forbids blocking or transport access.
@@ -1743,6 +1747,9 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
   native_ufs_probe_requested = probe != 0;
+  unsigned takeover = 0;
+  PE_parse_boot_argn ("native-ufs-takeover", &takeover, sizeof (takeover));
+  nativeUfsTakeoverAllowed = takeover != 0;
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {

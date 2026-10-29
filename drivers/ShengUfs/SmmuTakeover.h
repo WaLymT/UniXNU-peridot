@@ -9,6 +9,9 @@ struct UfsSmmuPlan {
 // ARM IHI 0062D.c sections 1.6 and 3.7: VA64=0 still rejects inputs above
 // 32 bits with SCTLR.M=0. With VA64=1 the bypass range is bounded by all
 // three hardware widths, not TCR2.PASize (which only limits translation).
+// Set by NativeUfs::start from native-ufs-takeover.
+extern bool nativeUfsTakeoverAllowed;
+
 static unsigned ufsSmmuAddressBits(unsigned code)
 {
   switch (code) {
@@ -57,6 +60,14 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
     if (match) {
       ++matches;
       if (matches > 1 || mask || !ourBank) {
+        // native-ufs-takeover=1: adopt the firmware's single, unmasked entry
+        // instead of refusing. The slot is kept; configureUfsSmmu rewrites its
+        // S2CR to our bypass bank, so the firmware's translation stops being
+        // used for this stream.
+        if (nativeUfsTakeoverAllowed && matches == 1 && !mask) {
+          p.reuse = true; p.slot = i;
+          continue;
+        }
         p.slot = i; p.smr = smr; p.s2cr = s2cr;
         p.error = "conflicting UFS stream mapping"; return p;
       }

@@ -656,3 +656,30 @@ panic(cpu 0 caller 0x...): NATIVE_UFS
 - 若已经是 **bypass 或恒等映射**：说明引导器的映射正好能承载我们那块物理连续的 DMA，
   驱动应当"采纳"而不是"接管"（跳过改写，直接用）
 - 若指向它自己的页表：必须显式重写，那是真正危险的操作，要先有它不在使用的证据
+
+### 接管（方案 A）：实现完成了，但未验证成功
+
+按"显式接管"加了 `native-ufs-takeover=1`：
+
+- `planUfsSmmu` 在冲突分支里，若开关打开且匹配唯一、无 mask，就复用引导器那条 SMR 的槽位
+- `configureUfsSmmu` 随后把这条 S2CR 重写指向我们的 bypass bank
+- 默认 `nativeUfsTakeoverAllowed = false`，不加参数行为不变
+
+**真机结果不一致**，而且有个必须记下的观察：
+
+| 启动参数 | 屏幕 |
+| --- | --- |
+| `native-ufs-probe=2` | 有 `NATIVE_UFS inspect` + panic（驱动正常） |
+| `native-ufs-probe=10`（接管前） | `conflicting UFS stream mapping` |
+| `native-ufs-probe=10 native-ufs-takeover=1` | **只有普通日志，没有 `NATIVE_UFS`** |
+
+A/B 证明补丁没有破坏驱动（`probe=2` 仍然工作），所以问题落在**接管路径本身**：
+要么写 S2CR 之后总线挂起、要么在打印前就停了。
+
+下一步的排查方向（按成本排序）：
+
+1. 在 `smmuBypassStream` 里、写 S2CR **之前**先 `panic` 打印一次 plan 结果——确认接管分支真的进了
+2. 写 S2CR 之后立刻 panic 打印读回值——把"挂住"和"写失败"分开
+3. 如果确认写 S2CR 会挂：说明引导器的翻译表仍被引用，接管不成立，应改走方案 B（复用它 CBNDX 17 的页表）
+
+**注**：这版补丁目前是"实现了但未验证"，默认关闭，不影响已验证的 `probe=2` 路径。
