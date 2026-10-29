@@ -1,6 +1,6 @@
 --- a/pexpert/gen/pe_gen.c
 +++ b/pexpert/gen/pe_gen.c
-@@ -131,11 +131,129 @@
+@@ -131,11 +131,141 @@
  
  extern void console_write_char(char);
  
@@ -48,7 +48,7 @@
 +static uint32_t  peridot_fb_y;
 +static boolean_t peridot_fb_ready;
 +
-+#define PERIDOT_FB_SCALE 2
++#define PERIDOT_FB_SCALE 4
 +
 +void
 +peridot_fb_putc(char c)
@@ -67,6 +67,18 @@
 +		peridot_fb_rowbytes = (uint32_t)PE_state.video.v_rowBytes;
 +		peridot_fb_width = (uint32_t)PE_state.video.v_width;
 +		peridot_fb_height = (uint32_t)PE_state.video.v_height;
++		/* Clear once: the panel keeps the previous boot's text, and a stale
++		 * panic sitting under the new log makes a photo unreadable. */
++		{
++			uint32_t fy, fx;
++			for (fy = 0; fy < peridot_fb_height; fy++) {
++				uint32_t *row = (uint32_t *)(peridot_fb +
++				    (uint64_t)fy * peridot_fb_rowbytes);
++				for (fx = 0; fx < peridot_fb_width; fx++) {
++					row[fx] = 0xFF000000u;
++				}
++			}
++		}
 +		peridot_fb_ready = TRUE;
 +		if (peridot_fb == NULL) {
 +			return;

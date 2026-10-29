@@ -94,7 +94,7 @@ dram_size = "0x80000000"
 
 # power state and then only reads the controller, the SMMU and the request
 # lists, printing what firmware left behind. Nothing is written with this set.
-kernel_args = ["-v", "native-ufs-probe=8"]
+kernel_args = ["-v"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
