@@ -5,3 +5,16 @@ name = "sm8635"
 kind = "soc"
 git = "https://github.com/OWNER/UniXNU-sm8635-common"
 commit = "TODO-40-CHARACTER-COMMIT"
+
+# ShengUfs is vendored under drivers/ShengUfs because peridot's UFS needs work
+# the pinned upstream revision does not do yet: it matches qcom,sm8550-ufshc and
+# reads SM8550 GCC offsets, while peridot is SM8635 / cliffs. A local source also
+# keeps the build working when github.com is unreachable, which it often is here.
+#
+# When the port is done this should go back to a pinned git source so the board
+# stays reproducible.
+
+[[source]]
+name = "ShengUfs"
+kind = "driver"
+local = "drivers/ShengUfs"

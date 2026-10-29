@@ -461,3 +461,63 @@ peridot-vc-guard.patch          gc_update_color 未初始化时打印并返回
 1. **UFS 驱动**（cliffs PHY + MCQ）——APFS 卡在这里就是因为没有块设备
 2. `ufshc` 的中断父节点为什么 `FindPHandle(1)` 找不到（ADT 里 phandle/宽度对不上？）
 3. 显示驱动（`GopFramebuffer` 两条路都编不过，详见 `docs/build-windows.md`）
+
+## 2026-10-29 中午：UFS 移植，摸清到链接期
+
+目标很明确：内核停在 `apfs_module_start`，因为**没有块设备**。UFS 是下一个关隘。
+
+### 已有的东西
+
+UniXNU 里唯一的 Qualcomm UFS 驱动是 `ShengUfs`（catalog 标注 SM8550 / sheng 专用）。
+从 stock DTS 取的事实表明 **cliffs 和 SM8550 在控制器层面一致**：
+
+| 事实 | peridot (SM8635 / cliffs) | 驱动假设 |
+| --- | --- | --- |
+| UFS 主机 | `ufshc@1d84000`，`reg` 首段 `0x3000` | `UFS_HC_BASE 0x1d84000`，size `0x3000` ✓ |
+| SMMU | `iommus = <&apps_smmu 0x60 0>` | stream `0x60` ✓ |
+| GCC | `clock-controller@100000` (`qcom,cliffs-gcc`) | `GCC_BASE 0x100000` ✓ |
+| compatible | `"qcom,ufshc"` | 只认 `"qcom,sm8550-ufshc"` ✗ |
+
+驱动**不配置时钟和 PHY**——它检查 GCC 的电源状态，然后假设引导器已经把链路拉起来，
+只做映射、SMMU 旁路、自建请求队列、NOP OUT、SCSI。这让移植看起来可行。
+
+### 做了什么
+
+1. **vendor 驱动**到 `drivers/ShengUfs`，在 `feeds.toml` 里用 `local` 源声明
+   （同时解决 github 不可达和"要改代码"两件事）
+2. `probe()` 增加接受 `"qcom,ufshc"`，注释里写清了三条必须成立的事实
+3. `[components] include` 加 `ShengUfs`（自动带入 `VirtioMmioBlock`、`VerifiedRoot`）
+4. `[kernel] archives` 显式列出存储组件——**arch profile 的列表是显式的，
+   一旦有 `component:` 条目就不会自动补齐，新组件必须自己写进去**
+5. 发现并修掉一个静默坑：`peridot_defconfig` 里本来就有
+   `# CONFIG_XNU_NATIVE_UFS is not set`，我"追加" `=y` 时被判断条件挡掉了，
+   文件里从来没出现那行；而且构建不会自动重跑 `defconfig`，`.config` 一直是旧的
+
+### 卡在哪：链接期
+
+驱动编译通过、`libShengUfs.a` 已生成、`-force_load` 也进了链接行，但缺符号：
+
+```
+IOBlockStorageDevice（整个类：vtable、构造、虚函数）
+verified_root_key / verified_root_policies
+boot_progress_poll
+```
+
+`IOBlockStorageDevice` 属于**外部 kext** `com.apple.iokit.IOStorageFamily`。
+VirtioBlock 和 RamBlock 是靠 `build/*-bindings.py` 把这类引用**绑定到原始 kext 的地址**
+（先 `audit-storage-interface.py` 审计 `refer/IOStorageFamily` 得出 ABI，
+再生成 bindings 归档）。**UFS 没有对应的绑定步骤**——那部分在 sheng 设备仓里。
+
+所以这不是开一个开关，而是要移植整条存储绑定流水线。
+
+### 下次从这里继续
+
+1. 写 `build-ufs-bindings.py`：照 `build-virtio-mmio-bindings.py` 的模式，
+   审计 IOStorageFamily 的 ABI，生成 NativeUfs 需要的 `IOBlockStorageDevice` 绑定
+2. 链接 `VerifiedRoot` kit 的归档（`verified_root_key/policies`）
+3. `boot_progress_poll`：驱动里是 weak 声明，但模板实例化把它变成强引用；
+   要么关掉 BOOT_PROGRESS，要么提供一个空实现
+4. 三者齐了之后，先跑 `native-ufs-probe=2`（只读检查），再跑 `=10`（只读 GPT 校验）
+
+**当前 `CONFIG_XNU_NATIVE_UFS` 已改回未设置**，仓库保持可构建；
+驱动的 vendor 副本和 `probe()` 的改动都保留着，随时可以接着做。

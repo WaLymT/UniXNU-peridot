@@ -18,12 +18,29 @@ os_profile = "ipados-17.7.11-21H461"
 # XnuPrelink are required to boot. Storage, display and input components are
 # added once their board recipes exist; see the porting record for the order.
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "ShengUfs"]
 
 [kernel]
 defconfig = "peridot_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8635.config", "os:configs/ipados.config"]
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+# The arm64 profile lists these explicitly, and an explicit list disables the
+# automatic addition of every selected component that has a build step, so the
+# storage components have to be named here too. Keep this equal to
+# profiles/arch/arm64/profile.toml plus the two storage additions; VirtioMmioBlock
+# comes first because ShengUfs depends on it.
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:SoftwareAES",
+  "build-software-aes-bindings.py",
+  "build-mockfs-fixture.py",
+  "build-libpthread-kernel.py",
+  "component:VirtioMmioBlock",
+  "component:ShengUfs",
+]
 
 # [kernel.prelink] is inherited from the OS profile: the iPadOS 17.7.11
 # kernelcache pin, slide, early_security_init address and roots list all belong
@@ -73,7 +90,10 @@ panic_screen = false
 # The probe now sits at the next frontier: arm_vm_init, which never returned
 # before that fix.
 dram_size = "0x80000000"
-kernel_args = ["-v"]
+# native-ufs-probe=2 is the driver's read-only inspection: it checks the GCC
+# power state and then only reads the controller, the SMMU and the request
+# lists, printing what firmware left behind. Nothing is written with this set.
+kernel_args = ["-v", "native-ufs-probe=2"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
