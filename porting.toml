@@ -84,18 +84,18 @@ evidence = []
 
 [[area]]
 id = "storage"
-status = "planned"
-components = []
-paths = ["board.toml", "dts/vendor/peridot-stock.dts"]
+status = "in-progress"
+components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot"]
+paths = ["board.toml", "feeds.toml", "configs/peridot_defconfig", "drivers/ShengUfs", "dts/vendor/peridot-stock.dts"]
 inputs = ["UFS host at 0x1d84000 with size 0x3000, ICE at 0x1d88000, ICE hardware key manager at 0x1d90000, MCQ registers, PHY at 0x1d80000 and the apps SMMU stream 0x60."]
-configuration = ["CONFIG_XNU_NATIVE_UFS is not set in peridot_defconfig until a storage implementation exists.", "The userdata window in board.toml is left at zero: the first and last LBA must come from this phone's GPT."]
-procedure = ["Read the GPT and confirm the userdata entry before writing any board value.", "Adapt the UFS implementation to the cliffs PHY generation and the MCQ register set, then verify a single-block read before mounting a root."]
-findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions that the SM8550 implementation does not use.", "ShengUfs keeps GCC and SMMU handling as constants, so reusing it means re-deriving the clock and stream tables for cliffs."]
+configuration = ["ShengUfs is vendored under drivers/ShengUfs and declared as a local source in feeds.toml, so it can be adapted for cliffs and the build survives an unreachable github.com.", "Its probe() accepts qcom,ufshc in addition to qcom,sm8550-ufshc; the three facts that make that safe (controller base, SMMU stream, GCC base) are in the comment there.", "CONFIG_XNU_NATIVE_UFS is still unset: the kernel does not link with it enabled.", "The userdata window in board.toml is left at zero: the first and last LBA must come from this phone's GPT."]
+procedure = ["Read the GPT and confirm the userdata entry before writing any board value.", "Provide the storage binding step (see next_action), then build and boot with native-ufs-probe=2 for a read-only inspection and native-ufs-probe=10 for a read-only GPT check before any write."]
+findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions that the SM8550 implementation does not use.", "ShengUfs keeps GCC and SMMU handling as constants, so reusing it means re-deriving the clock and stream tables for cliffs.", "The transport does not program clocks or the PHY: it checks GCC power state and assumes the bootloader left the link up, which is what fastboot boot gives us.", "The driver compiles and libShengUfs.a builds, but the kernel link fails with three groups of missing symbols: IOBlockStorageDevice (external IOStorageFamily kext), verified_root_key/policies (VerifiedRoot) and boot_progress_poll.", "VirtioBlock and RamBlock resolve the storage class through build/*-bindings.py, which audits refer/IOStorageFamily and binds the imports to the original kext; there is no equivalent script for UFS in UniXNU."]
 completion = ["SCSI capacity, GPT and known blocks are correct, then the configured root volume mounts and launchd starts."]
-limits = ["No storage driver is selected. This is the highest-risk area of the port."]
-next_action = ["Confirm the UFS controller version from the device and decide whether ShengUfs can be adapted or a new implementation is needed."]
+limits = ["The kernel cannot link with CONFIG_XNU_NATIVE_UFS yet, so nothing has been read from the device through this driver."]
+next_action = ["Write the UFS equivalent of build-virtio-mmio-bindings.py: audit refer/IOStorageFamily, bind IOBlockStorageDevice for NativeUfs, link the VerifiedRoot kit and provide boot_progress_poll, then re-enable CONFIG_XNU_NATIVE_UFS."]
 
-evidence = []
+evidence = ["2026-10-29: libShengUfs.a builds (473 KB NativeUfs.o, 634 symbols) and -force_load reaches the link line; the link then fails on IOBlockStorageDevice, verified_root_key/policies and boot_progress_poll, so CONFIG_XNU_NATIVE_UFS was returned to unset to keep the tree building."]
 
 [[area]]
 id = "display"
