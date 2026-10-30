@@ -37,11 +37,15 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
       (dataBytes ? (direction != 1 && direction != 2) : direction != 0)) return kIOReturnBadArgument;
   if (gHost.poisoned) return kIOReturnNotReady;
   if (read32 (gHost.hc, 0x58) != 0) {
+    panic ("NATIVE_UFS stale doorbell dbr=%x is=%x",
+           read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x20));
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnBusy, *ocs);
   }
   if (read32 (gHost.hc, 0x20) & kUfsFatalStatus) {
+    panic ("NATIVE_UFS fatal is=%x hcs=%x",
+           read32 (gHost.hc, 0x20), read32 (gHost.hc, 0x30));
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnIOError, *ocs);
@@ -148,7 +152,10 @@ static IOReturn hostResponseHeader (uint8_t type, uint8_t lun, uint8_t tag)
 
 static IOReturn hostNop (void)
 {
-  if (!hostClearUcd ()) return kIOReturnNotReady;
+  if (!hostClearUcd ()) {
+    panic ("NATIVE_UFS clear ucd failed dbr=%x is=%x",
+           read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x20));
+  }
   gHost.virt[kUcdOffset + 3] = 1;
   uint32_t ocs = 15;
   IOReturn result = hostSubmit (0, 0, 200000, &ocs);
