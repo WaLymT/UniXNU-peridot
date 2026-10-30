@@ -997,6 +997,11 @@ static bool hostBringUp (const char **why)
     gRootDiagnostic.cba2r = read32 (gHost.smmu, 0x1800 + 4 * (report[0] >> 16));
   }
   if (!hostStartQueue (why)) return false;
+  {
+    uint32_t hcs = read32 (gHost.hc, 0x30), isr = read32 (gHost.hc, 0x20);
+    kprintf ("NATIVE_UFS uic hcs=%x ucrdy=%u utrlrdy=%u is=%x\n",
+             hcs, hcs & 1U, (hcs >> 1) & 1U, isr);
+  }
   kprintf ("NATIVE_UFS queue up slot=%u bank=%u\n", report[0] & 0xffffU, report[0] >> 16);
   gRootDiagnostic.stage = "NOP OUT";
   // NOP OUT proves the transport before touching the SCSI layer.

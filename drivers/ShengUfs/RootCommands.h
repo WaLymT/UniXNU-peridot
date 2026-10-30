@@ -87,6 +87,9 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   gRootDiagnostic.isSeen = state.interruptSeen;
   *ocs = state.ocs;
   if (end != UfsTransferEnd::Completed) {
+    const uint8_t *rp = gHost.virt + kUcdOffset + kRspOffset;
+    panic ("NATIVE_UFS cmd fail ocs=%x dw0=%x dw2=%x rsp=%x %x %x %x",
+           state.ocs, words[0], words[2], rp[0], rp[1], rp[2], rp[3]);
     // No cancel/reset/retry: the controller may still own the buffer, even
     // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
     gHost.poisoned = true;

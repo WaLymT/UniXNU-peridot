@@ -860,3 +860,44 @@ AMFI 正是因为看到了新的块设备才去走根验证，然后撞上缺 PM
 才能判断是"控制器未使能"、"门铃未消费"还是"命令未完成"。
 
 **下一次不要重复盲试**：先把这四个寄存器打出来，再决定改哪里。
+
+## 2026-10-30 傍晚：链路是通的，卡在第一条命令
+
+### 已确证的硬件状态（全部来自寄存器读回）
+
+| 项 | 值 | 结论 |
+|---|---|---|
+| SMMU 自建映射 | `slot=5 bank=0 smr=0x80000060 s2cr=0x0` | 写入并读回一致 ✅ |
+| 控制器使能 | `hce=1` | ✅ |
+| 请求列表 | `hostStartQueue` 成功，基址读写一致 | ✅ |
+| UIC 就绪 | `hcs=0x10f`，`ucrdy=1`，`utrlrdy=1` | ✅ 链路是活的 |
+| UIC 命令完成 | `uccs=0` | 驱动从未主动发过 UIC 命令 |
+
+### 一个结构性问题
+
+`0x60` 在 UFSHCI 里是 **UICCMD**（UIC 命令寄存器），而驱动把它当成"队列开关"：
+
+```
+RootQueue.h:34   hostWrite (0x60, 0);   // 以为在停队列
+RootQueue.h:55   hostWrite (0x60, 1);   // 以为在启队列 → 实际是 DME_LINKSTARTUP
+```
+
+`ucrdy=1` 很可能正是这次"误发"的 LINKSTARTUP 带来的。这不是错误的**结果**，
+但说明 UIC 层没有被显式管理。
+
+### 仍未解决：NOP OUT
+
+观测不一致（有时打印 `bring-up failed: NOP OUT`，有时无输出直接重启），
+说明失败发生在不同位置。已知的早期返回点：
+
+1. `hostClearUcd()` 返回 false → `kIOReturnNotReady`（**没有打印**）
+2. `hostSubmit` 的 `0x58 != 0` / IS fatal → poisoned（**没有打印**）
+3. `pollUfsTransfer` 超时（有打印，但路径不稳定）
+
+### 下次的第一件事
+
+给 `hostClearUcd` 的失败和 `hostSubmit` 的每个早退都加 `panic`（不是 kprintf，
+kprintf 会被后续日志冲掉），一次只保留一个，直到确认是哪一条返回。
+
+在此之前不要改寄存器映射——今天我已经因为误判 UFSHCI 版本改错偏移，
+导致队列起不来（已回滚）。
