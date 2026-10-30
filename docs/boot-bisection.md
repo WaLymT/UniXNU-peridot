@@ -831,3 +831,32 @@ AMFI 正是因为看到了新的块设备才去走根验证，然后撞上缺 PM
 2. **AMFI**：peridot 需要一条"没有 PMGR 也能通过"的路径，否则块设备一出现就 panic
 
 这两条现在互相影响：UFS 越成功，AMFI 越早 panic。
+
+## 2026-10-30：SMMU 映射建立成功，传输层卡在 NOP OUT
+
+今天最重要的一步：**驱动第一次自己写入 SMMU 映射并被硬件接受**。
+
+### 关键实测数据
+
+| 测量 | 值 | 含义 |
+|---|---|---|
+| `inspect()` / bank | `bank=1  cbar=0x1ff00000  sctlr=0x…0ee0` | bank 1 的 **M 位 = 0 → bypass** |
+| `smmu live` | `scr0`/`idr0` 非零 | 在 `hostBringUp` 时刻 SMMU **可访问** |
+| `smr scan` | `found=1  idx=0  s2cr=0` | 固件那条映射在交棒后**已被禁用** |
+| `smmu installed` | `slot=5  bank=0  smr=0x80000060  s2cr=0x0` | **写入并读回一致** ✅ |
+| `queue up` | `slot=5  bank=0` | `hostStartQueue` 成功 ✅ |
+| `NOP OUT` | 失败 | 卡点 |
+
+### 结论
+
+1. 之前所有 conflict 的根因：**固件映射已禁用**，代码却以为它还在
+2. 正确做法不是"接管/采纳"，而是**在空闲槽位新建一条映射**，指向一个 `SCTLR.M=0` 的 bypass bank
+3. `src` 的 `cbar & 0x3f == bank` 判据是错误的（CBAR 低 6 位并非 CBNDX），**唯一可靠判据是 `SCTLR` 的 bit0**
+
+### 未解决
+
+`hostNop()` 失败，但两次观测不一致（一次有 `bring-up failed: NOP OUT`，一次无输出）。
+需要在失败时把 `HCE`(0x34)、`UTRLDBR`(0x40)、`IS`(0x20)、`HCS`(0x30) 一并打印，
+才能判断是"控制器未使能"、"门铃未消费"还是"命令未完成"。
+
+**下一次不要重复盲试**：先把这四个寄存器打出来，再决定改哪里。

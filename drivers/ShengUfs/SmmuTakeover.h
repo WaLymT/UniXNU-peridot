@@ -72,7 +72,8 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
           unsigned existing = s2cr & 0xffU;
           uint32_t cbBase = read ((p.pages + existing) * 4096);
           uint32_t cbarExisting = read (0x1000 + 4 * existing);
-          if ((cbBase & 1U) == 0 && (cbarExisting & 0x3fU) == existing) {
+          (void)cbarExisting;
+          if ((cbBase & 1U) == 0) {
             p.adopt = true; p.reuse = true; p.slot = i; p.bank = existing;
             continue;
           }

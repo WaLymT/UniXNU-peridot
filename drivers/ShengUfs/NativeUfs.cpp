@@ -35,7 +35,7 @@ extern const uint8_t verified_root_key[];
 #include "SmmuTakeover.h"
 
 // Bumped on every bring-up build so the screen names the binary that ran.
-#define NATIVE_UFS_BUILD_TAG 15
+#define NATIVE_UFS_BUILD_TAG 16
 
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
@@ -302,6 +302,39 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
 {
   uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, keep);
   if (!smmu) {
+    panic ("NATIVE_UFS smmu: map failed");
+  }
+  // Firmware's stream entry is gone (the scan found no active mapping), so
+  // install our own in a free slot, pointing at a bank whose stage 1 is off.
+  {
+    uint32_t idr0v = read32 (smmu, 0x20);
+    uint32_t idr1v = read32 (smmu, 0x24);
+    unsigned groups = idr0v & 0xffU;
+    if (groups == 0 || groups > 128) { groups = 128; }
+    unsigned pages = 1U << (((idr1v >> 28) & 7) + 1);
+    unsigned banks = (idr0v >> 24) & 0xffU;
+    if (banks == 0 || banks > 128) { banks = pages; }
+    int slot = -1, bank = -1;
+    for (unsigned i = 0; i < groups && slot < 0; i++) {
+      if ((read32 (smmu, 0x800 + 4 * i) & 0x80000000U) == 0) { slot = (int)i; }
+    }
+    for (unsigned b = 0; b < banks && bank < 0; b++) {
+      if ((read32 (smmu + (pages + b) * 4096, 0) & 1U) == 0) { bank = (int)b; }
+    }
+    if (slot < 0 || bank < 0) {
+      panic ("NATIVE_UFS smmu install: slot=%d bank=%d groups=%u banks=%u", slot, bank, groups, banks);
+    }
+    write32 (smmu, 0x800 + 4 * slot, 0x80000060U);
+    write32 (smmu, 0xc00 + 4 * slot, (uint32_t) bank & 0xffU);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    uint32_t vs = read32 (smmu, 0x800 + 4 * slot), vc = read32 (smmu, 0xc00 + 4 * slot);
+    kprintf ("NATIVE_UFS smmu installed slot=%d bank=%d smr=%x s2cr=%x\n", slot, bank, vs, vc);
+    // The mapping is in place and verified: the transport can use it directly.
+    report[0] = (uint32_t) slot | ((uint32_t) bank << 16);
+    report[1] = vs;
+    report[2] = vc;
+    return;
+  }  if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
   UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });
@@ -741,7 +774,7 @@ void NativeUfs::dumpFirmwareList (void)
 void NativeUfs::inspectSmmu (void)
 {
   OSSharedPtr<IOMemoryMap> map;
-  uintptr_t smmu = mapPhys (0x15000000ULL, 0x1000, map);
+  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, map);
   if (!smmu) {
     panic ("NATIVE_UFS smmu: map failed");
   }
@@ -964,13 +997,18 @@ static bool hostBringUp (const char **why)
     gRootDiagnostic.cba2r = read32 (gHost.smmu, 0x1800 + 4 * (report[0] >> 16));
   }
   if (!hostStartQueue (why)) return false;
+  kprintf ("NATIVE_UFS queue up slot=%u bank=%u\n", report[0] & 0xffffU, report[0] >> 16);
   gRootDiagnostic.stage = "NOP OUT";
   // NOP OUT proves the transport before touching the SCSI layer.
   if (hostNop () != kIOReturnSuccess) {
     gHost.ready = false;
     *why = "NOP OUT";
-    return false;
+    panic ("NATIVE_UFS nop fail hcs=%x is=%x dbr=%x hce=%x",
+           read32 (gHost.hc, 0x30), read32 (gHost.hc, 0x20),
+           read32 (gHost.hc, 0x40), read32 (gHost.hc, 0x34));
   }
+  panic ("NATIVE_UFS nop ok hcs=%x is=%x",
+         read32 (gHost.hc, 0x30), read32 (gHost.hc, 0x20));
   uint32_t power = 0;
   gRootDiagnostic.stage = "power mode query";
   if (hostQueryRead (0x03, 0x02, &power) != kIOReturnSuccess) {
@@ -1777,6 +1815,7 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
   if (probe == 2) {
+    inspectSmmu ();
     inspect ();
   }
   if (probe == 8) {
