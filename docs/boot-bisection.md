@@ -931,3 +931,68 @@ kprintf 会被后续日志冲掉），一次只保留一个，直到确认是哪
 写屏本身可能不可用，价值有限。
 
 **结论：优先走"早期路径 + panic"，不要在 hostBringUp 里继续猜。**
+
+## 2026-11-02：UFS 打通，第一次读到真实存储数据
+
+### 结论先说
+
+**传输代码没有问题。** 把仓库里的驱动换成已发布的 `UniXNU/ShengUfs` 之后，
+`RootQueue.h` 与原版**逐字节相同**，`RootCommands.h` 只差探针。也就是说这两周
+在传输层做的所有修改，都建立在"代码有缺陷"这个错误前提上。
+
+真正的差异只有一处：**peridot 固件把 UFS 流映射到 CBNDX 17**，而驱动的
+`planUfsSmmu` 只接受自己算出来的 bank（倒数第一个）。于是每次都报
+`conflicting UFS stream mapping`。
+
+### 修法（20 行）
+
+在 `SmmuTakeover.h` 的冲突分支里，当"唯一匹配、无 mask"时读一次目标 bank 的
+`SCTLR`：**M 位为 0（stage 1 关闭 ⇒ 物理直通）就直接采纳，一个寄存器都不写**。
+
+```cpp
+if (matches == 1 && !mask) {
+  unsigned existing = s2cr & 0xffU;
+  if (existing < banks && (read ((p.pages + existing) * 4096) & 1U) == 0) {
+    p.adopt = true; p.reuse = true;
+    p.bank = existing; p.slot = i; p.smr = smr; p.s2cr = s2cr;
+    return p;
+  }
+}
+```
+
+调用方在 `plan.adopt` 时直接填 report 并返回，跳过 `configureUfsSmmu`。
+
+### 设备上的结果（probe=10）
+
+```
+NATIVE_UFS root check
+userdata first=0x253000  last=0x7aab7fa
+block0 magic 00000000 00000000
+```
+
+- `hostBringUp` 完成：队列启动、NOP OUT 通过
+- GPT 解析成功，`userdata` 窗口读出
+- 窗口首块是全零：未格式化或加密卷，符合预期
+
+### 窗口值怎么来的
+
+`first_lba` 由设备实测（0x253000）。`last_lba` 不能靠念屏幕上的数字——它由
+`fastboot getvar partition-size:userdata` 的 0x78587FB000 字节推出：
+126191611 个 4096 字节扇区，`last = first + count - 1 = 0x7AAB7FA`，
+与 `board.toml` 里的交叉校验一致。
+
+### 走过的弯路（记下来）
+
+| 尝试 | 结果 |
+|---|---|
+| 认为驱动缺逻辑，逐层加探针 | 探针本身破坏了构建/运行，反而看不到输出 |
+| 运行期字号变量 | 新增全局符号让平台驱动注册失败 |
+| `debug=0x1` 想冻结 panic | 实际启用 KDP，设备挂起等调试器 |
+| 刷 boot 分区（v0 / GKI 拆分 / 禁验证 vbmeta） | ABL 全部回退；`slot-unbootable` 需 `erase misc` 才清 |
+| 手工重建 64 MB payload | 可用，但 `fastboot boot` 下才有效 |
+
+### 下一步
+
+1. `probe=11`：读各 window 自己的 GPT
+2. 读 userdata 窗口里更靠后的块，判断是否已有可识别的文件系统
+3. 只有确认布局之后才考虑写入
