@@ -4,15 +4,12 @@ struct UfsSmmuPlan {
   unsigned slot = 0xffffffffU, bank = 0, pages = 0;
   uint32_t smr = 0, s2cr = 0;
   bool reuse = false;
+  bool adopt = false;   // use the firmware mapping as-is; nothing is written
   const char *error = nullptr;
-    bool adopt = false;   // use the firmware's existing bypass bank as-is
 };
 // ARM IHI 0062D.c sections 1.6 and 3.7: VA64=0 still rejects inputs above
 // 32 bits with SCTLR.M=0. With VA64=1 the bypass range is bounded by all
 // three hardware widths, not TCR2.PASize (which only limits translation).
-// Set by NativeUfs::start from native-ufs-takeover.
-extern bool nativeUfsTakeoverAllowed;
-
 static unsigned ufsSmmuAddressBits(unsigned code)
 {
   switch (code) {
@@ -61,25 +58,15 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
     if (match) {
       ++matches;
       if (matches > 1 || mask || !ourBank) {
-        // native-ufs-takeover=1: adopt the firmware's single, unmasked entry
-        // instead of refusing. The slot is kept; configureUfsSmmu rewrites its
-        // S2CR to our bypass bank, so the firmware's translation stops being
-        // used for this stream.
+        // peridot: the firmware maps our stream to a bank of its own choosing.
+        // If that bank has stage 1 off (SCTLR.M = 0) it already passes physical
+        // addresses, so use it as it stands instead of rewriting the mapping.
         if (matches == 1 && !mask) {
-          // The firmware's entry targets some context bank. If that bank has
-          // stage 1 off (SCTLR.M=0) and a bypass CBAR, it already passes
-          // physical addresses and can be used unchanged.
           unsigned existing = s2cr & 0xffU;
-          uint32_t cbBase = read ((p.pages + existing) * 4096);
-          uint32_t cbarExisting = read (0x1000 + 4 * existing);
-          (void)cbarExisting;
-          if ((cbBase & 1U) == 0) {
-            p.adopt = true; p.reuse = true; p.slot = i; p.bank = existing;
-            continue;
-          }
-          if (nativeUfsTakeoverAllowed) {
-            p.reuse = true; p.slot = i;
-            continue;
+          if (existing < banks && (read ((p.pages + existing) * 4096) & 1U) == 0) {
+            p.adopt = true; p.reuse = true;
+            p.bank = existing; p.slot = i; p.smr = smr; p.s2cr = s2cr;
+            return p;
           }
         }
         p.slot = i; p.smr = smr; p.s2cr = s2cr;

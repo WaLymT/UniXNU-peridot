@@ -37,15 +37,11 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
       (dataBytes ? (direction != 1 && direction != 2) : direction != 0)) return kIOReturnBadArgument;
   if (gHost.poisoned) return kIOReturnNotReady;
   if (read32 (gHost.hc, 0x58) != 0) {
-    panic ("NATIVE_UFS stale doorbell dbr=%x is=%x",
-           read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x20));
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnBusy, *ocs);
   }
   if (read32 (gHost.hc, 0x20) & kUfsFatalStatus) {
-    panic ("NATIVE_UFS fatal is=%x hcs=%x",
-           read32 (gHost.hc, 0x20), read32 (gHost.hc, 0x30));
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnIOError, *ocs);
@@ -91,9 +87,6 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   gRootDiagnostic.isSeen = state.interruptSeen;
   *ocs = state.ocs;
   if (end != UfsTransferEnd::Completed) {
-    const uint8_t *rp = gHost.virt + kUcdOffset + kRspOffset;
-    panic ("NATIVE_UFS cmd fail ocs=%x dw0=%x dw2=%x rsp=%x %x %x %x",
-           state.ocs, words[0], words[2], rp[0], rp[1], rp[2], rp[3]);
     // No cancel/reset/retry: the controller may still own the buffer, even
     // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
     gHost.poisoned = true;
@@ -152,10 +145,7 @@ static IOReturn hostResponseHeader (uint8_t type, uint8_t lun, uint8_t tag)
 
 static IOReturn hostNop (void)
 {
-  if (!hostClearUcd ()) {
-    panic ("NATIVE_UFS clear ucd failed dbr=%x is=%x",
-           read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x20));
-  }
+  if (!hostClearUcd ()) return kIOReturnNotReady;
   gHost.virt[kUcdOffset + 3] = 1;
   uint32_t ocs = 15;
   IOReturn result = hostSubmit (0, 0, 200000, &ocs);
@@ -299,20 +289,42 @@ static bool hostStoreOpen (uint64_t first, uint64_t blocks)
   return true;
 }
 
+// Set once by the panic path (native_ufs_log_panic): the CPUs that still run may hold the host lock forever, so it is tried for 200 ms
+// and the command is then issued without it. Commands only poll (TransferPoll.h), so they also run with interrupts masked.
+static bool gHostPanic = false;
+
+static bool hostLock (void)
+{
+  if (!gHostPanic) {
+    IOLockLock (gHost.lock);
+    return true;
+  }
+  for (unsigned tries = 0; tries < 200000; tries++) {
+    if (IOLockTryLock (gHost.lock)) return true;
+    IODelay (1);
+  }
+  return false;
+}
+
+static void hostUnlock (bool held)
+{
+  if (held) IOLockUnlock (gHost.lock);
+}
+
 // WRITE(10) of `blocks` 4096-byte blocks from src to lba on LUN 0; the range must lie inside one open window.
 static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const void *src, bool fua = false)
 {
   if (!gHost.ready || !src || !blocks || blocks > kDataMax / 4096 || lun != 0 || !hostInWindow (lba, blocks)) {
     return kIOReturnBadArgument;
   }
-  IOLockLock (gHost.lock);
+  const bool held = hostLock ();
   gRootDiagnostic.lba = lba;
   memcpy (gHost.virt + kDataOffset, src, blocks * 4096U);
   uint8_t cdb[10] = { 0x2a, uint8_t (fua ? 0x08 : 0), uint8_t (lba >> 24), uint8_t (lba >> 16), uint8_t (lba >> 8), uint8_t (lba),
                       0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
   uint32_t scsi = 0;
   IOReturn status = hostScsiDir (0, cdb, 10, 1, blocks * 4096U, 2000000, &scsi);
-  IOLockUnlock (gHost.lock);
+  hostUnlock (held);
   return status;
 }
 
@@ -320,11 +332,11 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
 static IOReturn hostSyncCache (void)
 {
   if (!gHost.ready || (!gStoreOpen && !gLogOpen)) return kIOReturnNotReady;
-  IOLockLock (gHost.lock);
+  const bool held = hostLock ();
   uint8_t cdb[10] = { 0x35 };
   uint32_t scsi = 0;
   IOReturn status = hostScsiDir (0, cdb, 10, 0, 0, 10000000, &scsi);
-  IOLockUnlock (gHost.lock);
+  hostUnlock (held);
   return status;
 }
 
