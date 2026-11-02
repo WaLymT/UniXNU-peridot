@@ -122,12 +122,12 @@ unique_chip_id = "required"
 # Also measured: max-download-size 768 MiB, partition-size:boot 96 MiB,
 # partition-size:super 8.5 GiB, current-slot a, slot-count 2.
 # Measured on 2026-11-02 by the driver (native-ufs-probe=10, root check): the GPT
-# entry named "userdata" starts at LBA 0x22DD88. last_lba is derived from the
+# entry named "userdata" starts at LBA 0x253000. last_lba is derived from the
 # partition size measured with `fastboot getvar partition-size:userdata`
 # (0x78587FB000 bytes = 126191611 sectors at 4096), so
 # last_lba - first_lba + 1 == 126191611 holds by construction.
-first_lba = 0x22DD88
-last_lba = 0x7A86582
+first_lba = 0x253000
+last_lba = 0x7AAB7FA
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
