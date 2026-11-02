@@ -996,3 +996,37 @@ block0 magic 00000000 00000000
 1. `probe=11`：读各 window 自己的 GPT
 2. 读 userdata 窗口里更靠后的块，判断是否已有可识别的文件系统
 3. 只有确认布局之后才考虑写入
+
+## 2026-11-02 深夜：根镜像写入成功，manifest 被识别
+
+### 写入方式
+
+Windows 上的 fastboot 都不行（32 位 `bad_alloc`；第三方 x64 构建在读整个文件时
+`out_of_range`；sparse 切片因引导器拒绝"跳过块"而报 `Volume Corrupt`）。
+
+最终可用的组合：
+
+```
+usbipd-win 把手机共享给 WSL
+WSL 里装 usbip（linux-tools-6.8.0-147 的 /usr/lib/linux-tools-6.8.0-147/usbip）
+WSL 里用 Google 官方 Linux 版 platform-tools 的 64 位 fastboot
+```
+
+`fastboot flash userdata` 把 8,382,658,048 字节的镜像自动拆成 12 个 sparse 块，
+790 秒写完。
+
+### 设备上的验证（probe=11）
+
+```
+NATIVE_UFS root windows
+userdata first=0x253000  last=0x7aab7fa
+manifest status=0  windows=2
+```
+
+- `manifest status` 从 1 变成 **0**：SHNGROOT manifest 被正确解析
+- `windows` 从 0 变成 **2**：OS 与 SystemOS 两个 window 都在
+
+### 关键教训
+
+Windows 的 fastboot 是 32 位程序（PE machine 0x014C），无法处理 >2 GB 镜像；
+Google 未提供 64 位 Windows 版本。想写大分区，必须走 Linux 64 位 fastboot。

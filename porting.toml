@@ -224,5 +224,6 @@ limits = ["No log capture has been performed on this board."]
 next_action = ["Capture the firmware log from the first boot attempt."]
 
 evidence = [  { kind = "device", reference = "drivers/ShengUfs/SmmuTakeover.h", command = "fastboot boot out/Mu-peridot-adopt.img with kernel_args -v native-ufs-probe=10", revision = "02a562d39c4cbd160633d3ab611010a994d54848", result = "hostBringUp completed: planUfsSmmu adopted the firmware stream mapping (single unmasked match, target bank SCTLR.M clear) instead of rewriting it, the request queue started, NOP OUT passed and findRootLayout read the GPT. The userdata entry starts at LBA 0x253000; block 0 of that window read as zeros, which is expected for an unformatted or encrypted volume." },
+  { kind = "device", reference = "drivers/ShengUfs/NativeUfs.cpp", command = "fastboot flash userdata userdata-root.img (8.74 GiB via Linux fastboot in WSL), then fastboot boot with kernel_args -v native-ufs-probe=11", revision = "02a562d39c4cbd160633d3ab611010a994d54848", result = "The 8.74 GiB SHNGROOT image was written in 12 sparse chunks; on the next boot root windows reported userdata first=0x253000 last=0x7aab7fa, manifest status=0 and windows=2, so the kernel now parses the root volume structure on this device." },
 ]
 
