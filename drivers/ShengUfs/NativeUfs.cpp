@@ -1036,16 +1036,14 @@ static bool hostBringUp (const char **why)
   kprintf ("NATIVE_UFS queue up slot=%u bank=%u\n", report[0] & 0xffffU, report[0] >> 16);
   gRootDiagnostic.stage = "NOP OUT";
   peridotTrace (50);   // NOP OUT
-  // NOP OUT proves the transport before touching the SCSI layer.
-  if (hostNop () != kIOReturnSuccess) {
-    gHost.ready = false;
-    *why = "NOP OUT";
-    panic ("NATIVE_UFS nop fail hcs=%x is=%x dbr=%x hce=%x",
-           read32 (gHost.hc, 0x30), read32 (gHost.hc, 0x20),
-           read32 (gHost.hc, 0x40), read32 (gHost.hc, 0x34));
+  // One short line: the return code and the poll counters say whether the
+  // command was submitted and whether the controller ever answered.
+  {
+    IOReturn nopRC = hostNop ();
+    panic ("UFS NOP=%x polls=%u db=%u is=%u",
+           (unsigned) nopRC, gRootDiagnostic.polls,
+           gRootDiagnostic.dbSeen, gRootDiagnostic.isSeen);
   }
-  panic ("NATIVE_UFS nop ok hcs=%x is=%x",
-         read32 (gHost.hc, 0x30), read32 (gHost.hc, 0x20));
   uint32_t power = 0;
   gRootDiagnostic.stage = "power mode query";
   peridotTrace (60);   // power mode query
@@ -1849,6 +1847,7 @@ bool NativeUfs::start (IOService *provider)
   unsigned probe = 0, rootMode = 0;
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
+  kprintf ("NATIVE_UFS start probe=%u root=%u\n", probe, rootMode);
   native_ufs_probe_requested = probe != 0;
   kprintf ("NATIVE_UFS start tag=%u probe=%u takeover=%u\n",
            (unsigned)NATIVE_UFS_BUILD_TAG, probe, nativeUfsTakeoverAllowed ? 1U : 0U);
