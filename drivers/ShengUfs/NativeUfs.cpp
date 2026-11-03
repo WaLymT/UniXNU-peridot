@@ -1742,6 +1742,7 @@ bool NativeUfsBlock::configureVerification ()
     return false;
   }
   // A header-only policy carries its hash table in the root image instead of the boot image.
+  panic ("UFS VR sel count=%llu m=%p mb=%llu bytes=%llu", verified_root_policy_count, (const void *) manifest, manifestBytes, bytes);
   const bool headerOnly = manifestBytes == VR_HEADER_BYTES + VR_SIGNATURE_BYTES;
   uint64_t hashBytes = 0;
   if (headerOnly) {
@@ -2322,8 +2323,8 @@ bool NativeUfs::startRoot (IOService *provider)
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
-      if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
-          !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+      if (!device || !device->init (static_cast<OSDictionary *> (nullptr))) return false;
+      if (!device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
       gRootDiagnostic.stage = "root window attachment";
       if (!device->attach (owner)) return false;
       gPendingAttached[index] = true;
