@@ -1,0 +1,8 @@
+# Kernel patch series must stay LF in the working tree. The build rsyncs this
+# repository into the WSL checkout and applies every patch with git apply, whose
+# context lines are matched byte-for-byte against the XNU feed sources (LF). With
+# core.autocrlf=true a checkout would otherwise rewrite these files with CRLF and
+# no patch would apply any more (verified: git apply --check fails on a CRLF copy
+# and only passes with --ignore-whitespace).
+*.patch text eol=lf
+patches/xnu/series text eol=lf
