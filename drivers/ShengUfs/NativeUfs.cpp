@@ -1727,6 +1727,14 @@ extern "C" {
 // Read by peridot-bdevsw-root.patch when the kernel adopts this disk as the root.
 volatile uint64_t native_ufs_bdev_absolute = 0;
 volatile uint64_t native_ufs_bdev_bytes = 0;
+// Set by the probe that wants the published bdevsw disk adopted as the kernel root
+// (native-ufs-probe=36, fix A in peridot/audit/2026-11-15-enotblk.md section 7). The kernel
+// side checks it in IOFindBSDRoot before the rd=/rootdev wait, so no other probe changes.
+int native_ufs_bdev_claim_root = 0;
+// The bdevsw slot registered by publishNativeBdev(). IOFindBSDRoot builds the root dev_t from
+// this instead of the rootdev global: the kernel resets rootdev to NODEV between IOKit start-up
+// and setconf (p364 showed claim=1 but rootdev=-1).
+int native_ufs_bdev_slot = -1;
 volatile uint32_t native_ufs_blocks_published = 0;
 volatile uint64_t native_ufs_block_reads = 0;
 volatile uint64_t native_ufs_block_failures = 0;
@@ -2907,10 +2915,30 @@ static void skipLeadingApfsGpt (uint64_t *absolute, uint64_t *bytes)
 }
 
 
+// One lock for the strategy read and write paths: the bounce buffer and the geometry are shared
+// (audit 2026-11-15 P1-6), and a bdevsw disk is called concurrently by the page cache.
+static IOLock *gBdevLock = nullptr;
+static volatile uint64_t gBdevLastFailLba = 0;
+static volatile uint32_t gBdevLastFailBytes = 0;
+static volatile int32_t gBdevLastFailStatus = 0;
+static volatile uint32_t gBdevLastFailWrite = 0;
+static volatile unsigned gBdevReads, gBdevWrites, gBdevFailures;
+
 static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
 {
-  if (!gBdevBounce || !data || !count || (count & 511) ||
-      block >= gBdevBytes / 512 || count > gBdevBytes - block * 512) return EINVAL;
+  const bool invalid = !gBdevBounce || !data || !count || (count & 511) ||
+      block >= gBdevBytes / 512 || count > gBdevBytes - block * 512;
+  if (invalid) {
+    // One line that says which precondition failed and with what geometry (EINVAL otherwise has
+    // no visible cause on this board; p366 showed "op=0 err=22 lba=15ee8 bytes=4096").
+    IOLog ("NATIVE_UFS bdev: invalid bounce=%d data=%d count=%u align=%u block=%llx"
+           " limit=%llx bytes=%llx\n",
+           gBdevBounce ? 1 : 0, data ? 1 : 0, count, count & 511,
+           static_cast<unsigned long long> (block),
+           static_cast<unsigned long long> (gBdevBytes / 512),
+           static_cast<unsigned long long> (gBdevBytes));
+    return EINVAL;
+  }
   uint64_t start = block * 512, done = 0;
   while (done < count) {
     uint64_t lba = (gBdevAbsolute + start + done) / 4096;
@@ -2930,13 +2958,54 @@ static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
 
 static void nativeBdevStrategy (struct buf *bp)
 {
-  uint64_t block = buf_blkno (bp);
-  uint32_t count = buf_count (bp);
-  int error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (buf_dataptr (bp)));
+  const uint64_t block = buf_blkno (bp);
+  const uint32_t count = buf_count (bp);
+  const bool writing = (buf_flags (bp) & B_READ) == 0;
+  int error = 0;
+
+  if (writing) {
+    // The UFS window is writable (hostMediaOpen in the probe), so serve writes through the same
+    // window writer the IOBlockStorageDevice path uses: WRITE(10) with FUA, read-modify-write
+    // for non-4096-byte requests. Without this a bdevsw root (fix A) can only read, and APFS
+    // cannot replay its journal or update the container it mounted read-write.
+    struct WriteOperations {
+      struct buf *buffer;
+      void lock () { if (gBdevLock) IOLockLock (gBdevLock); }
+      void unlock () { if (gBdevLock) IOLockUnlock (gBdevLock); }
+      IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
+        return hostRead4k (0, lba, blocks, out);
+      }
+      IOReturn write (uint64_t lba, uint32_t blocks, const void *in) {
+        return hostWrite4k (0, lba, blocks, in, true);
+      }
+      uint64_t gather (uint64_t offset, void *dst, uint64_t length) {
+        memcpy (dst, reinterpret_cast<const uint8_t *> (buf_dataptr (buffer)) + offset, length);
+        return length;
+      }
+    } writeOperations = { bp };
+    UfsWindowResult outcome = ufsWriteWindow (writeOperations, gBdevAbsolute, gBdevBytes, block, count, gBdevBounce);
+    if (outcome.status != kIOReturnSuccess) error = EIO;
+  } else {
+    if (gBdevLock) IOLockLock (gBdevLock);
+    error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (buf_dataptr (bp)));
+    if (gBdevLock) IOLockUnlock (gBdevLock);
+  }
+
   if (error) {
+    __atomic_fetch_add (&gBdevFailures, 1, __ATOMIC_RELAXED);
+    gBdevLastFailLba = block;
+    gBdevLastFailBytes = count;
+    gBdevLastFailStatus = error;
+    gBdevLastFailWrite = writing ? 1 : 0;
+    // The screen is the only channel; log the failing request so a photo shows where it stops.
+    IOLog ("NATIVE_UFS bdev: op=%u err=%d lba=%llx bytes=%u\n", writing ? 1u : 0u, error,
+           static_cast<unsigned long long> (block), count);
+    buf_seterror (bp, error);
     buf_setresid (bp, count);
     __atomic_fetch_add (&native_ufs_block_failures, 1, __ATOMIC_RELAXED);
   } else {
+    if (writing) __atomic_fetch_add (&gBdevWrites, 1, __ATOMIC_RELAXED);
+    else __atomic_fetch_add (&gBdevReads, 1, __ATOMIC_RELAXED);
     buf_setresid (bp, 0);
   }
   buf_biodone (bp);
@@ -2950,10 +3019,13 @@ static void publishNativeBdev (bool claimRoot)
   int slot = bdevsw_add (-1, &operations);
   gBdevSlot = slot;
   if (slot < 0) return;
+  // Export the slot for the kernel's IOFindBSDRoot (peridot-bdevsw-root.patch).
+  native_ufs_bdev_slot = slot;
   // gBdevAbsolute/gBdevBytes must be set by the caller before publishing: they are the window
   // this bdevsw disk serves. publishNativeBdev() no longer guesses them (probe 18 used to hand
   // the kernel a 0/0 device; audit 2026-11-15, P1-1).
   gBdevBounce = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  if (!gBdevLock) gBdevLock = IOLockAlloc ();
   thread_t thread = nullptr;
   if (kernel_thread_start (bdevTestThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate (thread);
   dev_t dev = makedev (slot, 0);
@@ -2964,8 +3036,10 @@ static void publishNativeBdev (bool claimRoot)
   if (claimRoot) rootdev = dev;
   native_ufs_bdev_absolute = gBdevAbsolute;
   native_ufs_bdev_bytes = gBdevBytes;
-  gBdevNode = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "disk0"));
-  if (!gBdevNode) IOLog ("NATIVE_UFS bdev: devfs_make_node(disk0) failed\n");
+  // "disk0" belongs to the IOMedia chain published by startApfsMediaRoot(); a second node with
+  // that name fails with EEXIST (seen on p361: "devfs: disk0: name slot allocation failed").
+  gBdevNode = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "nu0"));
+  if (!gBdevNode) IOLog ("NATIVE_UFS bdev: devfs_make_node(nu0) failed\n");
   // native-ufs-mountroot=1 runs the real mountroot once the bdevsw contract is met.
   // Off by default: bdevvp() panics when the open is refused and a panic here resets
   // the device.
@@ -3042,6 +3116,10 @@ static bool startApfsMdRoot ()
 // IOBlockStorageDevice, let IOBlockStorageDriver create the IOMedia, and report what appears,
 // including the APFS container scheme instances and the media's BSD name.
 static NativeUfsBlock *gApfsMediaDevice = nullptr;
+// Absolute first LBA of the published window, recorded for the probe 34 data-path test
+// (the block-device block numbers are relative to the window, the kernel transport wants
+// absolute LBAs).
+static uint64_t gApfsMediaFirstLba = 0;
 
 static void apfsMediaReportThread (void *argument, wait_result_t)
 {
@@ -3145,6 +3223,66 @@ static void rootFsReportThread (void *, wait_result_t)
          reinterpret_cast<void *> (rv), reinterpret_cast<void *> (mp));
 }
 
+// ---- Block-device data path self test (native-ufs-probe=34) ---------------------------
+// The p356 write test called hostWrite4k() directly - the kernel transport, not the path
+// userland and IOBlockStorageDriver use. The install goal needs the other path: a write
+// that arrives through IOBlockStorageDevice::doAsyncReadWrite(). This probe drives that
+// exact entry with an IOMemoryDescriptor, reads the block back through the kernel transport
+// and restores the original bytes. It is the regression test for audit 2026-11-15 P0-1
+// (the hostSyncCache gate made every such write return kIOReturnNotReady).
+struct DeviceIoCompletion { volatile unsigned status; volatile unsigned done; };
+static void deviceIoComplete (void *, void *parameter, IOReturn status, UInt64 actual)
+{
+  DeviceIoCompletion *completion = static_cast<DeviceIoCompletion *> (parameter);
+  completion->status = static_cast<unsigned> (status);
+  completion->done = static_cast<unsigned> (actual);
+}
+static IOReturn deviceWriteBlock (NativeUfsBlock *device, uint64_t block, uint32_t bytes, const void *source)
+{
+  IOMemoryDescriptor *buffer = IOMemoryDescriptor::withAddress (const_cast<void *> (source), bytes, kIODirectionOut);
+  if (!buffer) return kIOReturnNoMemory;
+  IOReturn status = buffer->prepare (kIODirectionOut);
+  if (status != kIOReturnSuccess) { buffer->release (); return status; }
+  DeviceIoCompletion done = { 0xffffffffU, 0 };
+  IOStorageCompletion completion;
+  completion.target = nullptr;
+  completion.action = deviceIoComplete;
+  completion.parameter = &done;
+  status = device->doAsyncReadWrite (buffer, block, bytes / 512U, nullptr, &completion);
+  buffer->complete ();
+  buffer->release ();
+  if (status != kIOReturnSuccess) return status;
+  return static_cast<IOReturn> (done.status);
+}
+static void deviceWriteTestThread (void *, wait_result_t)
+{
+  IOSleep (6000);                                   // let IOBlockStorageDriver open the device
+  NativeUfsBlock *device = gApfsMediaDevice;
+  if (!device || !gApfsMediaFirstLba) panic ("NATIVE_UFS devio: no published device");
+  const uint32_t bytes = 4096;
+  const uint64_t block = 64;                        // 32 KiB into the window = first_lba + 8 (probe 33 block)
+  const uint64_t lba = gApfsMediaFirstLba + block / 8;
+  uint8_t *original = static_cast<uint8_t *> (IOMalloc (bytes));
+  uint8_t *work = static_cast<uint8_t *> (IOMalloc (bytes));
+  uint8_t *readback = static_cast<uint8_t *> (IOMalloc (bytes));
+  if (!original || !work || !readback) panic ("NATIVE_UFS devio: no buffers");
+  IOReturn readRc = hostRead4k (0, lba, 1, original);
+  memcpy (work, original, bytes);
+  for (uint32_t i = 0; i < bytes; i += 64) work[i] = static_cast<uint8_t> (work[i] ^ 0x5a);
+  IOReturn writeRc = deviceWriteBlock (device, block, bytes, work);
+  memset (readback, 0, bytes);
+  IOReturn backRc = hostRead4k (0, lba, 1, readback);
+  int matched = (backRc == kIOReturnSuccess) && !memcmp (readback, work, bytes);
+  IOReturn restoreRc = deviceWriteBlock (device, block, bytes, original);
+  memset (readback, 0, bytes);
+  IOReturn checkRc = hostRead4k (0, lba, 1, readback);
+  int restored = (checkRc == kIOReturnSuccess) && !memcmp (readback, original, bytes);
+  panic ("NATIVE_UFS devio block=%d read=%d write=%d reread=%d match=%d restore=%d verify=%d ok=%d",
+         static_cast<int> (block), static_cast<int> (readRc), static_cast<int> (writeRc),
+         static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
+         (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+}
+
 static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
 {
   const char *why = "";
@@ -3159,6 +3297,7 @@ static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, b
   if (blocks * 4096ULL < kApfsMdBytes) {
     panic ("NATIVE_UFS apfs-media: userdata is smaller than the container");
   }
+  gApfsMediaFirstLba = first;
   uint64_t absolute = first * 4096ULL;
   IOLog ("NATIVE_UFS apfs-media: userdata abs=%llx bytes=%llx\n",
          static_cast<unsigned long long> (absolute),
@@ -3565,6 +3704,39 @@ bool NativeUfs::start (IOService *provider)
            static_cast<unsigned long long> (lba), mediaOpened ? 1 : 0, static_cast<int> (readRc), static_cast<int> (writeRc),
            static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
            (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+  }
+  if (probe == 36) {
+    // Fix A from peridot/audit/2026-11-15-enotblk.md section 7: root the APFS container from
+    // the real UFS block device. The UFS window is published as the bdevsw disk and claimed as
+    // rootdev; the kernel patch makes IOFindBSDRoot adopt it before the rd=/rootdev wait, while
+    // the rd=md1 boot arg remains only APFS's ramdisk-branch ticket (no md device is created).
+    // APFS container_rootmount then hands this devvp to container_mount, so the mounted root
+    // lives on UFS instead of the memory copy and writes can reach the disk.
+    if (!startApfsMediaRoot (this, false, false, false)) return false;
+    if (gBdevSlot < 0) panic ("NATIVE_UFS ufs-root: no bdevsw slot");
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS ufs-root: no userdata partition");
+    if (!hostMediaOpen (first, kApfsMdBytes / 4096)) panic ("NATIVE_UFS ufs-root: cannot open the writable media window");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    IOLog ("NATIVE_UFS ufs-root: rootdev=%d maj=%u min=%u bytes=%llx claim=1\n",
+           static_cast<int> (rootdev), static_cast<unsigned> (major (rootdev)),
+           static_cast<unsigned> (minor (rootdev)), static_cast<unsigned long long> (kApfsMdBytes));
+    return true;
+  }
+  if (probe == 34) {
+    // Same root and media publication as probe 18, then a write through the block-device data
+    // path (IOBlockStorageDevice::doAsyncReadWrite) with read-back and restore. This is the
+    // regression test for audit 2026-11-15 P0-1.
+    if (!startApfsMdRoot ()) return false;
+    if (!startApfsMediaRoot (this, false, false, false)) return false;
+    thread_t thread = nullptr;
+    if (kernel_thread_start (deviceWriteTestThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS devio: cannot start the thread");
+    }
+    thread_deallocate (thread);
+    return true;
   }
   if (probe == 18) {
     // Root = the APFS container at the start of userdata, read into a memory device.

@@ -1,5 +1,5 @@
---- a/iokit/bsddev/IOKitBSDInit.cpp
-+++ b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp	2026-11-15 22:27:06.083231456 +0800
++++ b/iokit/bsddev/IOKitBSDInit.cpp	2026-11-15 22:27:06.139234519 +0800
 @@ -50,6 +50,7 @@
  #include <mach/machine.h>
  #include <uuid/uuid.h>
@@ -8,7 +8,7 @@
  #include <sys/mount.h>
  #include <corecrypto/ccsha2.h>
  #include <kdp/sk_core.h>
-@@ -67,6 +68,33 @@
+@@ -67,6 +68,40 @@
  extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
  extern void di_root_ramfile(IORegistryEntry * entry);
  extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
@@ -16,44 +16,72 @@
 +
 +// peridot: the root may be a bdevsw disk registered directly by the platform UFS
 +// driver (drivers/ShengUfs/NativeUfs.cpp). Such a device never shows up as an
-+// IOMedia, so the wait below cannot succeed; when it is registered and openable,
-+// IOFindBSDRoot adopts it instead of timing out.
++// IOMedia, so the wait below cannot succeed; when the driver claims it, IOFindBSDRoot
++// adopts it instead of timing out.
 +extern dev_t rootdev;
 +extern uint64_t native_ufs_bdev_absolute;
 +extern uint64_t native_ufs_bdev_bytes;
++// The bdevsw slot the driver registered, and the flag that says "use it as the root".
++extern int native_ufs_bdev_slot;
++extern int native_ufs_bdev_claim_root;
++
++// rootdev in this kernel is reset to NODEV somewhere between IOKit start-up and setconf
++// (p364: claim=1 rootdev=-1), so the adopted device is built from the exported slot.
++static dev_t
++peridotBdevswRootDev(void)
++{
++	int slot = native_ufs_bdev_slot;
++
++	if (!native_ufs_bdev_claim_root || slot < 0 || slot >= nblkdev) {
++		return NODEV;
++	}
++	if (bdevsw[slot].d_open == NULL || bdevsw[slot].d_open == eno_opcl) {
++		return NODEV;
++	}
++	return makedev(slot, 0);
++}
 +
 +static boolean_t
 +peridotBdevswRootReady(void)
 +{
-+	int maj;
-+
-+	if (rootdev == NODEV) {
-+		return false;
-+	}
-+	maj = major(rootdev);
-+	if (maj < 0 || maj >= nblkdev) {
-+		return false;
-+	}
-+	if (bdevsw[maj].d_open == NULL || bdevsw[maj].d_open == eno_opcl) {
-+		return false;
-+	}
-+	return true;
++	return peridotBdevswRootDev() != NODEV;
 +}
  extern boolean_t cpuid_vmm_present(void);
  
  #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
-@@ -918,6 +946,16 @@
+@@ -720,6 +755,21 @@
+ 		rdBootVar[0] = 0;
+ 	}
+ 
++	// peridot: one line that tells the bring-up where the rd= device stands before any wait.
++	IOLog("peridot: rd=%s claim=%d slot=%d rootdev=%d ready=%d" "\n", rdBootVar,
++	    native_ufs_bdev_claim_root, native_ufs_bdev_slot, (int)rootdev,
++	    peridotBdevswRootReady());
++
++	// peridot: adopt the driver-claimed bdevsw root before the rd=/rootdev wait.
++	if (peridotBdevswRootReady()) {
++		*root = peridotBdevswRootDev();
++		*oflags = 0;
++		strlcpy(rootName, "nu0", rootNameSize);
++		IOLog("peridot: adopting bdevsw root %d/%d abs=%llx bytes=%llx" "\n",
++		    major(*root), minor(*root), native_ufs_bdev_absolute, native_ufs_bdev_bytes);
++		return kIOReturnSuccess;
++	}
++
+ 	if ((regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+ 		do {
+ 			di_root_ramfile(regEntry);
+@@ -918,6 +968,15 @@
  			// The disk isn't found - have the user pick from System Recovery.
  			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
  #elif XNU_TARGET_OS_IOS
 +			if (peridotBdevswRootReady()) {
-+				mjr = major(rootdev);
-+				mnr = minor(rootdev);
-+				*root = rootdev;
++				*root = peridotBdevswRootDev();
 +				*oflags = flags;
-+				strlcpy(rootName, "disk0", rootNameSize);
-+				IOLog("peridot: adopting bdevsw root %d/%d abs=%llx bytes=%llx" "\n", mjr, mnr,
-+				    native_ufs_bdev_absolute, native_ufs_bdev_bytes);
++				strlcpy(rootName, "nu0", rootNameSize);
++				IOLog("peridot: adopting bdevsw root %d/%d abs=%llx bytes=%llx" "\n",
++				    major(*root), minor(*root), native_ufs_bdev_absolute,
++				    native_ufs_bdev_bytes);
 +				goto iofrootx;
 +			}
  			panic("Failed to mount root device");

@@ -1,6 +1,6 @@
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -826,7 +826,18 @@
+@@ -848,7 +848,28 @@
  		}
  		if (xchar >= 0) {                                                                                /* Do we have a valid memory device name? */
  			OSSafeReleaseNULL(matching);
@@ -8,11 +8,21 @@
 +			/* peridot: the memory device that carries the APFS container is created by the
 +			 * platform storage driver during IOKit start-up, which can finish after this boot
 +			 * argument is parsed. Real restore hardware supplies the ramdisk before the kernel
-+			 * starts; wait briefly for the device instead of panicking so the APFS ramdisk
-+			 * root path is still taken. */
++			 * starts; wait for it instead of panicking so the APFS ramdisk root path is taken.
++			 * The same wait also adopts the bdevsw root the driver claimed (peridot-bdevsw-root). */
 +			for (int peridotRdw = 0; peridotRdw < 900; peridotRdw++) {
 +				*root = mdevlookup(xchar);                                              /* Find the device number */
 +				if (*root >= 0) {
++					break;
++				}
++				if ((peridotRdw % 100) == 0) {
++					IOLog("peridot: rd wait %d claim=%d slot=%d ready=%d" "\n",
++					    peridotRdw, native_ufs_bdev_claim_root,
++					    native_ufs_bdev_slot, peridotBdevswRootReady());
++				}
++				if (peridotBdevswRootReady()) {
++					/* Keep the mdN name so APFS still takes its ramdisk restore branch. */
++					*root = peridotBdevswRootDev();
 +					break;
 +				}
 +				IOSleep(100);
