@@ -1,0 +1,280 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -48,6 +48,11 @@
+ #include <sys/mount_internal.h>
+ #include <sys/fcntl.h>
+ #include <sys/file_internal.h>
++/* peridot: exec progress, reported inside the init SIGKILL panic. */
++extern int peridot_exec_stage;
++extern unsigned int peridot_macho_magic, peridot_macho_filetype, peridot_macho_flags;
++extern unsigned int peridot_check_flags, peridot_check_bits;
++
+ #include <sys/ubc_internal.h>
+ #include <sys/imgact.h>
+ #include <sys/codesign.h>
+@@ -460,6 +465,7 @@
+ 	load_return_t           lret;
+ 	boolean_t enforce_hard_pagezero = TRUE;
+ 	int in_exec = (imgp->ip_flags & IMGPF_EXEC);
++	peridot_exec_stage = 6;
+ 	task_t task = current_task();
+ 	int64_t                 aslr_page_offset = 0;
+ 	int64_t                 dyld_aslr_page_offset = 0;
+@@ -789,6 +795,7 @@
+ 	struct dylinker_command *dlp = 0;
+ 	void *                  control;
+ 	load_return_t           ret = LOAD_SUCCESS;
++	peridot_exec_stage = 7;
+ 	void *                  addr;
+ 	vm_size_t               alloc_size, cmds_size;
+ 	size_t                  offset;
+@@ -851,10 +858,14 @@
+ 	if (!grade_binary(header->cputype,
+ 	    header->cpusubtype & ~CPU_SUBTYPE_MASK,
+ 	    header->cpusubtype & CPU_SUBTYPE_MASK, TRUE)) {
++		peridot_exec_stage = 11;
+ 		return LOAD_BADARCH;
+ 	}
+ 
+ 	abi64 = ((header->cputype & CPU_ARCH_ABI64) == CPU_ARCH_ABI64);
++	peridot_macho_magic = (unsigned int)header->magic;
++	peridot_macho_filetype = (unsigned int)header->filetype;
++	peridot_macho_flags = (unsigned int)header->flags;
+ 
+ 	switch (header->filetype) {
+ 	case MH_EXECUTE:
+@@ -1467,11 +1478,15 @@
+ 
+ 	if (ret == LOAD_SUCCESS) {
+ 		if (!got_code_signatures && cs_process_global_enforcement()) {
++			peridot_exec_stage = 12;
+ 			ret = LOAD_FAILURE;
+ 		}
+ 
+ 		/* Make sure if we need dyld, we got it */
++		peridot_check_flags = (unsigned int)header->flags;
++		peridot_check_bits = (unsigned int)((depth << 8) | (dlp ? 1 : 0) | (result->needs_dynlinker ? 2 : 0));
+ 		if (result->needs_dynlinker && !dlp) {
++			peridot_exec_stage = 13;
+ 			ret = LOAD_FAILURE;
+ 		}
+ 
+@@ -1510,6 +1525,7 @@
+ 
+ 		if ((ret == LOAD_SUCCESS) && (depth == 1)) {
+ 			if (result->thread_count == 0) {
++				peridot_exec_stage = 14;
+ 				ret = LOAD_FAILURE;
+ 			}
+ #if CONFIG_ENFORCE_SIGNED_CODE
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -386,6 +386,12 @@
+ 
+ struct image_params;    /* Forward */
+ static int exec_activate_image(struct image_params *imgp);
++
++/* peridot: 0 untouched, 1 execve, 2 activate, 3 perms ok, 4 header ok,
++ * 6 load_machfile, 7 parse_machfile, 11..14 rejection points. */
++int peridot_exec_stage = 0;
++unsigned int peridot_macho_magic, peridot_macho_filetype, peridot_macho_flags;
++unsigned int peridot_check_flags, peridot_check_bits;
+ static int exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp);
+ static int load_return_to_errno(load_return_t lrtn);
+ static int execargs_alloc(struct image_params *imgp);
+@@ -400,6 +406,10 @@
+ static int copyoutptr(user_addr_t ua, user_addr_t ptr, int ptr_size);
+ static void exec_resettextvp(proc_t, struct image_params *);
+ static int process_signature(proc_t, struct image_params *);
++
++/* peridot: 1 mac_return, 2 cs_error, 3 launch constraints, 4 signed,
++ * 5..7 taskgated results, 9 proc_process_signature, 10 thread signature. */
++int peridot_sig_stage = 0;
+ static void exec_prefault_data(proc_t, struct image_params *, load_result_t *);
+ static errno_t exec_handle_port_actions(struct image_params *imgp,
+     struct exec_port_actions *port_actions);
+@@ -851,6 +861,7 @@
+ 		goto bad;
+ 	}
+ 
++	peridot_exec_stage = 4;
+ 	if (resid) {
+ 		memset(imgp->ip_vdata + (PAGE_SIZE - resid), 0x0, resid);
+ 	}
+@@ -2210,6 +2221,7 @@
+ {
+ 	struct nameidata *ndp = NULL;
+ 	const char *excpath;
++	peridot_exec_stage = 2;
+ 	int error;
+ 	int resid;
+ 	int once = 1;   /* save SGUID-ness for interpreted files */
+@@ -2277,6 +2289,7 @@
+ 	if (error) {
+ 		goto bad;
+ 	}
++	peridot_exec_stage = 3;
+ 
+ 	/* Copy; avoid invocation of an interpreter overwriting the original */
+ 	if (once) {
+@@ -5124,6 +5137,7 @@
+ 	struct __mac_execve_args muap;
+ 	int err;
+ 
++	peridot_exec_stage = 1;
+ 	memoryshot(VM_EXECVE, DBG_FUNC_NONE);
+ 
+ 	muap.fname = uap->fname;
+@@ -7605,6 +7619,21 @@
+ 	int spawn = (imgp->ip_flags & IMGPF_SPAWN);
+ 	const int vfexec = 0;
+ 	os_reason_t signature_failure_reason = OS_REASON_NULL;
++	int peridot_allow_unsigned = 0;
++
++	if (PE_parse_boot_argn("peridot-allow-unsigned-root",
++	    &peridot_allow_unsigned, sizeof(peridot_allow_unsigned)) &&
++	    peridot_allow_unsigned != 0) {
++		/* Bring-up: the RAM-disk root executable has no code signature, so the
++		 * MAC exec hook denies it and init dies with SECURITY_POLICY. */
++		imgp->ip_mac_return = 0;
++		if (imgp->ip_cs_error != OS_REASON_NULL) {
++			os_reason_free(imgp->ip_cs_error);
++			imgp->ip_cs_error = OS_REASON_NULL;
++		}
++		imgp->ip_csflags |= CS_SIGNED | CS_VALID;
++		peridot_sig_stage = 99;
++	}
+ 
+ 	/*
+ 	 * Override inherited code signing flags with the
+@@ -7632,6 +7661,7 @@
+ 	 * approve of exec, kill and return immediately.
+ 	 */
+ 	if (imgp->ip_mac_return != 0) {
++		peridot_sig_stage = 1;
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+ 		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);
+ 		signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
+@@ -7641,6 +7671,7 @@
+ 	}
+ 
+ 	if (imgp->ip_cs_error != OS_REASON_NULL) {
++		peridot_sig_stage = 2;
+ 		signature_failure_reason = imgp->ip_cs_error;
+ 		imgp->ip_cs_error = OS_REASON_NULL;
+ 		error = EACCES;
+@@ -7650,6 +7681,7 @@
+ 	/* call the launch constraints hook */
+ 	os_reason_t launch_constraint_reason;
+ 	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
++		peridot_sig_stage = 3;
+ 		signature_failure_reason = launch_constraint_reason;
+ 		goto done;
+ 	}
+@@ -7698,6 +7730,7 @@
+ 	/* If the code signature came through the image activation path, we skip the
+ 	 * taskgated / externally attached path. */
+ 	if (imgp->ip_csflags & CS_SIGNED) {
++		peridot_sig_stage = 4;
+ 		error = 0;
+ 		goto done;
+ 	}
+@@ -7708,6 +7741,7 @@
+ 
+ 	kr = task_get_task_access_port(proc_task(p), &port);
+ 	if (KERN_SUCCESS != kr || !IPC_PORT_VALID(port)) {
++		peridot_sig_stage = 8;
+ 		error = 0;
+ 		if (require_success) {
+ 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -7729,9 +7763,11 @@
+ 	kr = __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__(port, proc_getpid(p));
+ 	switch (kr) {
+ 	case KERN_SUCCESS:
++		peridot_sig_stage = 5;
+ 		error = 0;
+ 		break;
+ 	case KERN_FAILURE:
++		peridot_sig_stage = 6;
+ 		error = EACCES;
+ 
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -7739,6 +7775,7 @@
+ 		signature_failure_reason = os_reason_create(OS_REASON_CODESIGNING, CODESIGNING_EXIT_REASON_TASKGATED_INVALID_SIG);
+ 		goto done;
+ 	default:
++		peridot_sig_stage = 7;
+ 		error = EACCES;
+ 
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -7795,6 +7832,9 @@
+ 		 */
+ 
+ 		error = proc_process_signature(p, &signature_failure_reason);
++		if (error != 0) {
++			peridot_sig_stage = 9;
++		}
+ 	}
+ 
+ 	if (0 == error) {
+@@ -7807,6 +7847,7 @@
+ 		kr = thread_process_signature(imgp->ip_new_thread, proc_get_task_raw(p));
+ 
+ 		if (kr != KERN_SUCCESS) {
++			peridot_sig_stage = 10;
+ 			error = EINVAL;
+ 			signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_MACHINE_THREAD);
+ 		}
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -2073,12 +2073,19 @@
+ 			    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
+ 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""));
+ 		} else {
++			extern int peridot_exec_stage;
++			extern unsigned int peridot_macho_magic, peridot_macho_filetype, peridot_macho_flags;
++			extern unsigned int peridot_check_flags, peridot_check_bits;
++			extern int peridot_sig_stage;
++			extern int peridot_user_exc_class;
++			extern unsigned int peridot_user_exc_esr;
++			extern unsigned long long peridot_user_exc_far, peridot_user_exc_pc;
+ 			launchd_exit_reason_desc = exit_reason_get_string_desc(signal_reason);
+-			panic_plain("unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
++			panic_plain("unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s stage=%d caller=%p magic=%x ft=%d fl=%x cf=%x cb=%x sig=%d exc=%d esr=%x far=%llx pc=%llx",
+ 			    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
+ 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""),
+ 			    signal_reason->osr_namespace, signal_reason->osr_code,
+-			    launchd_exit_reason_desc ? launchd_exit_reason_desc : "none");
++			    launchd_exit_reason_desc ? launchd_exit_reason_desc : "none", (int)peridot_exec_stage, __builtin_return_address(0), peridot_macho_magic, (int)peridot_macho_filetype, peridot_macho_flags, peridot_check_flags, peridot_check_bits, peridot_sig_stage, peridot_user_exc_class, peridot_user_exc_esr, peridot_user_exc_far, peridot_user_exc_pc);
+ 		}
+ 	}
+ 
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -26,6 +26,11 @@
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ 
++/* peridot: last user-mode synchronous exception, reported in the init panic. */
++int peridot_user_exc_class;
++unsigned int peridot_user_exc_esr;
++unsigned long long peridot_user_exc_far, peridot_user_exc_pc;
++
+ #include <arm/caches_internal.h>
+ #include <arm/cpu_data.h>
+ #include <arm/cpu_data_internal.h>
+@@ -641,6 +646,14 @@
+ #endif
+ 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+ 
++	if (is_user) {
++		/* peridot:console I/O is not allowed here; the init panic text prints these. */
++		peridot_user_exc_class = (int)class;
++		peridot_user_exc_esr = esr;
++		peridot_user_exc_far = (unsigned long long)far;
++		peridot_user_exc_pc = (unsigned long long)get_saved_state_pc(state);
++	}
++
+ #if CONFIG_SPTM
+ 	// Lockdown should only be initiated for kernel exceptions
+ 	assert(!(is_user && did_initiate_panic_lockdown));

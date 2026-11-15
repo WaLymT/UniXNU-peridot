@@ -1,6 +1,8 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index f1f23ec..5781c5c 100644
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -1221,7 +1221,11 @@
+@@ -1221,7 +1221,11 @@ gc_show_cursor(unsigned int xx, unsigned int yy)
  static void
  gc_update_color(int color, boolean_t fore)
  {

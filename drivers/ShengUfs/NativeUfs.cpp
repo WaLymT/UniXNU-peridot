@@ -13,6 +13,19 @@
 #endif
 #include <mach/mach_vm.h>
 #include <sys/param.h>
+#include <sys/conf.h>
+// DKIOCGETBLOCKSIZE / DKIOCSETBLOCKSIZE / DKIOCGETBLOCKCOUNT: the block-device
+// contract spec_open() checks before it lets a bdevsw vnode open.
+#include <sys/disk.h>
+#include <sys/buf.h>
+#include <sys/proc.h>
+#include <miscfs/devfs/devfs.h>
+#ifndef DEVFS_BLOCK
+#define DEVFS_BLOCK 1
+#endif
+#ifdef __cplusplus
+extern "C" void buf_biodone (struct buf *);
+#endif
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
 #include "verified_root.h"
 #include "VerifiedBlockPolicy.h"
@@ -21,7 +34,10 @@ extern const struct vr_crypto vr_xnu_crypto;
 extern const uint8_t verified_root_key[];
 }
 #endif
+#include <libkern/c++/OSKext.h>
+#include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSNumber.h>
+#include <IOKit/IOCatalogue.h>
 #include <libkern/c++/OSIterator.h>
 #include <IOKit/IOBSD.h>
 #include <kern/thread.h>
@@ -39,8 +55,18 @@ extern const uint8_t verified_root_key[];
 #include "TransferPoll.h"
 #include "SmmuTakeover.h"
 
+// pe_init.c (peridot-last-panic-print.patch): render the previous boot's log tail.
+extern "C" void pe_panic_last_log (void);
+// pe_init.c panic region state, so one boot proves whether panic-base took effect.
+extern "C" vm_offset_t gPanicBase;
+extern "C" unsigned int gPanicSize;
+
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
+// native-ufs-allow-unverified=1: bring-up publication without the owner policy, the same
+// mode the muyu port uses. The windows are published on their own geometry and the
+// publisher waits for any media below each window instead of a signed volume identity.
+static bool gAllowUnverifiedRoot;
 static void rootDiagnosticFailure (const char *reason);
 
 extern "C" {
@@ -119,6 +145,7 @@ static bool contains (const char *data, size_t length, const char *needle)
 
 IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
 {
+  IOLog ("NUPR\n");
   native_ufs_probe_calls = native_ufs_probe_calls + 1;
   if (OSDynamicCast (IOPlatformExpertDevice, provider)) {
     // Second personality (KernelConfigTables: IOMatchCategory NativeUfsRoot): attaches to the
@@ -1557,6 +1584,70 @@ extern "C" unsigned native_ufs_store_gpt_check (void)
 // One read-only window of the root image as a block device: 512-byte sectors on top of 4096-byte
 // UFS blocks, so the unchanged dmg disk images (GPT with 512-byte sectors) parse as they do on
 // the virtio path.
+// Publication checkpoints and media-creation probes, read by the report thread.
+static volatile unsigned gStartCheckpoint;
+static volatile unsigned gDeviceCalls[6];
+static volatile int gBdevSlot = -2;
+static volatile int gBdevTestError = -1;
+static volatile uint32_t gBdevMagic = 0;
+static volatile int gBdevScan = -1;
+static volatile int gRootMountError = -100;
+static volatile uintptr_t gBdevNode = 0;
+// bdevsw window geometry and the block-device ioctl answers, kept here so the mount
+// thread can report them before anything it calls can panic.
+static volatile uint64_t gBdevAbsolute = 0, gBdevBytes = 0;
+static unsigned gBdevIoctlCalls, gBdevIoctlSize, gBdevIoctlSetSize, gBdevIoctlCount, gBdevIoctlOther;
+static uint32_t gBdevBlockSize = 512;
+static void publishNativeBdev ();
+extern "C" int vfs_mountroot (void);
+// bsd/kern/bsd_init.c: the device vfs_mountroot() hands to bdevvp(). Nothing sets it
+// on this port (setconf() never runs), so it is still major 0 when we mount.
+extern "C" dev_t rootdev;
+static volatile int gRootMountDev = -1;
+static volatile int gRootMountMajor = -1;
+static int nativeBdevRead (uint64_t, uint32_t, uint8_t *);
+
+static void mountRootThread (void *, wait_result_t)
+{
+  rootdev = makedev (gBdevSlot, 0);
+  gRootMountDev = static_cast<int> (rootdev);
+  gRootMountMajor = major (rootdev);
+  uint8_t *head = static_cast<uint8_t *> (IOMalloc (4096));
+  int headRead = head ? nativeBdevRead (0, 4096, head) : -1;
+  IOLog ("NATIVE_UFS mountroot: rootdev=%d major=%d minor=%d slot=%d abs=%llx bytes=%llx "
+         "read=%d head=%02x%02x%02x%02x at32=%02x%02x%02x%02x\n",
+         static_cast<int> (rootdev), major (rootdev), minor (rootdev), gBdevSlot,
+         static_cast<unsigned long long> (gBdevAbsolute),
+         static_cast<unsigned long long> (gBdevBytes), headRead,
+         head ? head[0] : 0, head ? head[1] : 0, head ? head[2] : 0, head ? head[3] : 0,
+         head ? head[32] : 0, head ? head[33] : 0, head ? head[34] : 0, head ? head[35] : 0);
+  if (head) IOFree (head, 4096);
+  gRootMountError = vfs_mountroot ();
+  IOLog ("NATIVE_UFS mountroot: vfs_mountroot returned %d\n", gRootMountError);
+}
+static int nativeBdevRead (uint64_t, uint32_t, uint8_t *);
+
+static void bdevTestThread (void *, wait_result_t)
+{
+  uint8_t *data = static_cast<uint8_t *> (IOMalloc (65536));
+  if (!data) return;
+  gBdevTestError = nativeBdevRead (0, 65536, data);
+  if (gBdevTestError == 0) {
+    gBdevMagic = (uint32_t (data[0]) << 24) | (uint32_t (data[1]) << 16) |
+                 (uint32_t (data[2]) << 8) | uint32_t (data[3]);
+    for (unsigned off = 0; off + 4 <= 65536; ++off) {
+      if (data[off] == 'N' && data[off + 1] == 'X' && data[off + 2] == 'S' && data[off + 3] == 'B') {
+        gBdevScan = static_cast<int> (off);
+        break;
+      }
+    }
+  }
+  IOFree (data, 65536);
+  IOLog ("NATIVE_UFS bdev: read=%d magic=%08x scan=%d bytes=%llx\n", gBdevTestError, gBdevMagic,
+         gBdevScan, static_cast<unsigned long long> (gBdevBytes));
+}
+
+
 class NativeUfsBlock : public IOBlockStorageDevice {
   OSDeclareDefaultStructors (NativeUfsBlock)
   uint64_t absolute = 0;      // byte offset of the window on LUN 0
@@ -1579,22 +1670,36 @@ public:
   const char *windowLabel () const { return label; }
   bool configure (const char *name, uint64_t absoluteOffset, uint64_t size);
   bool start (IOService *provider) override;
+  bool handleOpen (IOService *client, IOOptionBits options, void *argument) override;
   void free () override;
   IOReturn doEjectMedia () override { return kIOReturnUnsupported; }
   IOReturn doFormatMedia (UInt64) override { return kIOReturnNotWritable; }
   UInt32 doGetFormatCapacities (UInt64 *, UInt32) const override { return 0; }
-  char *getVendorString () override { return const_cast<char *> ("Native"); }
+  char *getVendorString () override { gDeviceCalls[4] = gDeviceCalls[4] + 1; return const_cast<char *> ("Native"); }
   char *getProductString () override { return label; }
   char *getRevisionString () override { return const_cast<char *> ("1.0"); }
   char *getAdditionalDeviceInfoString () override { return const_cast<char *> ("UFS LUN 0 userdata window, read-only"); }
-  IOReturn reportBlockSize (UInt64 *value) override { *value = 512; return kIOReturnSuccess; }
+  IOReturn reportBlockSize (UInt64 *value) override {
+    gDeviceCalls[0] = gDeviceCalls[0] + 1;
+    *value = 512;
+    return kIOReturnSuccess;
+  }
   IOReturn reportEjectability (bool *value) override { *value = false; return kIOReturnSuccess; }
-  IOReturn reportMaxValidBlock (UInt64 *value) override { *value = bytes / 512 - 1; return kIOReturnSuccess; }
+  IOReturn reportMaxValidBlock (UInt64 *value) override {
+    gDeviceCalls[1] = gDeviceCalls[1] + 1;
+    *value = bytes / 512 - 1;
+    return kIOReturnSuccess;
+  }
   IOReturn reportMediaState (bool *present, bool *changed) override {
+    gDeviceCalls[2] = gDeviceCalls[2] + 1;
     *present = online; if (changed) *changed = false; return kIOReturnSuccess;
   }
   IOReturn reportRemovability (bool *value) override { *value = false; return kIOReturnSuccess; }
-  IOReturn reportWriteProtection (bool *value) override { *value = true; return kIOReturnSuccess; }
+  IOReturn reportWriteProtection (bool *value) override {
+    gDeviceCalls[3] = gDeviceCalls[3] + 1;
+    *value = true;
+    return kIOReturnSuccess;
+  }
   IOReturn doSynchronizeCache () override { return online ? kIOReturnSuccess : kIOReturnNotReady; }
   IOReturn doSynchronize (UInt64, UInt64, IOOptionBits) override { return doSynchronizeCache (); }
   IOReturn getWriteCacheState (bool *value) override { *value = false; return kIOReturnSuccess; }
@@ -1613,6 +1718,9 @@ extern "C" IOService *native_ufs_source_create (void)
 #endif
 
 extern "C" {
+// Read by peridot-bdevsw-root.patch when the kernel adopts this disk as the root.
+volatile uint64_t native_ufs_bdev_absolute = 0;
+volatile uint64_t native_ufs_bdev_bytes = 0;
 volatile uint32_t native_ufs_blocks_published = 0;
 volatile uint64_t native_ufs_block_reads = 0;
 volatile uint64_t native_ufs_block_failures = 0;
@@ -1661,6 +1769,7 @@ bool NativeUfsBlock::configure (const char *name, uint64_t absoluteOffset, uint6
     return false;
   }
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
+  if (gAllowUnverifiedRoot) return true;
   // Reads are served only after each 4096-byte integrity block verifies against the owner-signed
   // policy; without a matching policy the device is never published.
   return configureVerification ();
@@ -1670,6 +1779,7 @@ bool NativeUfsBlock::configure (const char *name, uint64_t absoluteOffset, uint6
 }
 
 // Data objects of the root image (version 2 manifest), recorded by startRoot before windows are configured.
+static volatile unsigned gPrepStage = 0;
 static RootWindow gRootObject[4];
 static uint32_t gRootObjects;
 static uint64_t gRootObjectBase;
@@ -1682,16 +1792,36 @@ volatile uint64_t native_ufs_verified_blocks = 0;
 static bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableBytes)
 {
   char name[32];
-  if (snprintf (name, sizeof (name), "%s.vroot", window) >= static_cast<int> (sizeof (name))) return false;
+  if (snprintf (name, sizeof (name), "%s.vroot", window) >= static_cast<int> (sizeof (name))) {
+    panic ("VRFAIL window name too long: %s", window);
+    return false;
+  }
   const RootWindow *object = nullptr;
   for (unsigned i = 0; i < gRootObjects; ++i)
     if (!strcmp (gRootObject[i].name, name)) object = &gRootObject[i];
-  if (!object || object->size != tableBytes) return false;
+  if (!object) {
+    panic ("VRFAIL no object %s (objects=%u)", name, gRootObjects);
+    return false;
+  }
+  // The generator pads each object to a whole 4096-byte block, while the signed
+  // header counts 32-byte hashes; only tableBytes is covered by the signature.
+  const uint64_t aligned = (tableBytes + 4095) & ~static_cast<uint64_t> (4095);
+  if (object->size != tableBytes && object->size != aligned) {
+    panic ("VRFAIL %s size=%llx expected=%llx aligned=%llx objects=%u", name,
+           (unsigned long long) object->size, (unsigned long long) tableBytes,
+           (unsigned long long) aligned, gRootObjects);
+    return false;
+  }
   uint64_t lba = (gRootObjectBase + object->offset) / 4096, done = 0;
   while (done < tableBytes) {
     uint64_t left = tableBytes - done;
-    uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
-    if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) return false;
+    uint32_t blocks = 1;
+    if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) {
+      panic ("VRFAIL table read lba=%llx done=%llu of %llu window=%s",
+             (unsigned long long) lba, (unsigned long long) done,
+             (unsigned long long) tableBytes, window);
+      return false;
+    }
     uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
     memcpy (table + done, gScratch, take);
     done += take;
@@ -1710,18 +1840,25 @@ bool NativeUfsBlock::configureVerification ()
   gRootDiagnostic.windowBytes = bytes;
   gRootDiagnostic.policyCount = verified_root_policy_count;
   gRootDiagnostic.verify = 0xffffffff;
+  // Every rejection below panics instead of returning false: a silent false cannot be
+  // told apart from a crash further along the failure path, and the screen only ever
+  // shows the tail of a panic.
+  auto reject = [&] (const char *why) -> bool {
+    panic ("VRFAIL %s window=%s bytes=%llx policies=%llu",
+           why, label, (unsigned long long) bytes,
+           (unsigned long long) verified_root_policy_count);
+    return false;
+  };
   // Select the one policy whose signed image size equals this window; two matches are refused.
   const uint8_t *manifest = nullptr;
   uint64_t manifestBytes = 0;
   if (!verified_root_policy_count || verified_root_policy_count > 16) {
-    gRootDiagnostic.stage = "policy count invalid";
-    return false;
+    return reject ("policy count invalid");
   }
   for (uint64_t index = 0; index < verified_root_policy_count; ++index) {
     const NativeVerifiedBlockPolicy &policy = verified_root_policies[index];
     if (!policy.manifest || policy.manifestBytes < VR_HEADER_BYTES + VR_SIGNATURE_BYTES) {
-      gRootDiagnostic.stage = "policy envelope invalid";
-      return false;
+      return reject ("policy envelope invalid");
     }
     uint64_t imageBytes = 0;
     for (unsigned i = 0; i < 8; ++i) {
@@ -1731,26 +1868,22 @@ bool NativeUfsBlock::configureVerification ()
       continue;
     }
     if (manifest) {
-      gRootDiagnostic.stage = "duplicate capacity-matching policy";
-      return false;
+      return reject ("duplicate capacity-matching policy");
     }
     manifest = policy.manifest;
     manifestBytes = policy.manifestBytes;
   }
   if (!manifest) {
-    gRootDiagnostic.stage = "no capacity-matching policy";
-    return false;
+    return reject ("no capacity-matching policy");
   }
   // A header-only policy carries its hash table in the root image instead of the boot image.
-  panic ("UFS VR sel count=%llu m=%p mb=%llu bytes=%llu", verified_root_policy_count, (const void *) manifest, manifestBytes, bytes);
   const bool headerOnly = manifestBytes == VR_HEADER_BYTES + VR_SIGNATURE_BYTES;
   uint64_t hashBytes = 0;
   if (headerOnly) {
     uint64_t count = 0;
     for (unsigned i = 0; i < 8; ++i) count |= static_cast<uint64_t> (manifest[32 + i]) << (8 * i);
     if (!count || count > (UINT64_MAX - manifestBytes) / 32) {
-      gRootDiagnostic.stage = "policy header block count";
-      return false;
+      return reject ("policy header block count");
     }
     hashBytes = count * 32;
     manifestBytes += hashBytes;
@@ -1758,21 +1891,20 @@ bool NativeUfsBlock::configureVerification ()
   gRootDiagnostic.stage = "policy storage";
   vm_size_t tableBytes = round_page (static_cast<vm_size_t> (manifestBytes));
   if (tableBytes < manifestBytes || tableBytes > UINT64_MAX - 4096) {
-    gRootDiagnostic.stage = "policy size overflow";
-    return false;
+    return reject ("policy size overflow");
   }
   verifiedStorageBytes = tableBytes + 4096;
   gRootDiagnostic.stage = "policy allocation";
   if (kmem_alloc (kernel_map, &verifiedStorage, verifiedStorageBytes,
                   static_cast<kma_flags_t> (KMA_KOBJECT | KMA_DATA), VM_KERN_MEMORY_SECURITY) != KERN_SUCCESS) {
-    return false;
+    return reject ("policy allocation");
   }
   if (headerOnly) {
     memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, VR_HEADER_BYTES + VR_SIGNATURE_BYTES);
     gRootDiagnostic.stage = "policy table object read";
     if (!readPolicyTable (label, reinterpret_cast<uint8_t *> (verifiedStorage) + VR_HEADER_BYTES + VR_SIGNATURE_BYTES,
                           hashBytes)) {
-      return false;
+      return reject ("policy table object read");
     }
   } else {
     memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
@@ -1782,13 +1914,18 @@ bool NativeUfsBlock::configureVerification ()
   gRootDiagnostic.stage = "policy read-only protection";
   if (mach_vm_protect (kernel_map, verifiedStorage, verifiedStorageBytes,
                        TRUE, VM_PROT_READ) != KERN_SUCCESS) {
-    return false;
+    return reject ("policy read-only protection");
   }
   gRootDiagnostic.stage = "owner signature and hash table";
   int status = vr_open (reinterpret_cast<const uint8_t *> (verifiedStorage), manifestBytes, key, 1,
                         &vr_xnu_crypto, &verified);
   gRootDiagnostic.verify = static_cast<uint32_t> (status);
-  return status == VR_OK && verified.image_bytes == bytes;
+  if (status != VR_OK || verified.image_bytes != bytes) {
+    panic ("VRFAIL vr_open status=%d image_bytes=%llx bytes=%llx window=%s",
+           status, (unsigned long long) verified.image_bytes, (unsigned long long) bytes, label);
+    return false;
+  }
+  return true;
 }
 
 bool NativeUfsBlock::authenticatesVolume (const char *uuid, uint8_t *manifestDigest) const
@@ -1851,19 +1988,43 @@ extern "C" int native_ufs_block_authenticates (IOService *provider, const char *
 }
 #endif
 
+
 bool NativeUfsBlock::start (IOService *provider)
 {
-  if (!bounce || !windowLock || !IOBlockStorageDevice::start (provider)) {
+  gStartCheckpoint = 1;
+  // The family start blocks for at least 30 s in this context (p84/p88), and
+  // skipping it leaves IOBlockStorageDriver unable to instantiate. Publication
+  // therefore goes through bdevsw now; this device only feeds the transport.
+  if (!bounce || !windowLock || !IOService::start (provider)) {
     return false;
   }
+  gStartCheckpoint = 2;
   online = true;
+  // IOBlockStorageDriver reads this property to classify the transport; without
+  // it the driver opens the device (NU8) but never calls any report method.
+  setProperty (kIOBlockStorageDeviceTypeKey, kIOBlockStorageDeviceTypeGeneric);
+  // registerService() silently refuses an object that is not attached to the
+  // IOService plane root ("not registry member"), and without it no personality is
+  // ever probed; the two markers say whether the call was entered and returned.
+  IOLog ("NU6 1 %s\n", label);
   registerService ();
+  gStartCheckpoint = 3;
+  IOLog ("NU6 2 %s\n", label);
   return true;
+}
+
+// The storage family opens this device before it starts: seeing the call proves the
+// personality matched and IOBlockStorageDriver::start() ran.
+bool NativeUfsBlock::handleOpen (IOService *client, IOOptionBits options, void *argument)
+{
+  IOLog ("NU8 open %s\n", client ? client->getName () : "-");
+  return IOBlockStorageDevice::handleOpen (client, options, argument);
 }
 
 IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
                                            IOStorageAttributes *, IOStorageCompletion *completion)
 {
+  gDeviceCalls[5] = gDeviceCalls[5] + 1;
   if (!buffer || !completion || !completion->action || !count || block >= bytes / 512 ||
       count > bytes / 512 - block || buffer->getLength () < count * 512) {
     return kIOReturnBadArgument;
@@ -1890,6 +2051,11 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     }
     IOReturn verify (uint64_t index, const void *data, size_t length) {
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
+      // Unverified bring-up: there is no policy, so accept the block the transport read.
+      if (gAllowUnverifiedRoot) {
+        (void) index; (void) data; (void) length;
+        return kIOReturnSuccess;
+      }
       uint64_t t0 = timerTicks ();
       int status = vr_verify_block (view, index, data, length, &vr_xnu_crypto);
       __atomic_fetch_add (&native_ufs_verify_ticks, timerTicks () - t0, __ATOMIC_RELAXED);
@@ -1955,6 +2121,13 @@ void NativeUfsBlock::free ()
 // volume by UUID immediately after the root is mounted, so SystemOS must already have published its
 // volume media by then; the OS window (whose volume is the root being waited for) goes last.
 static NativeUfsBlock *gPendingDevice[4];
+// The object each window attached to. start() must be called with the same provider,
+// otherwise the parent link and the start argument disagree and the storage family
+// never matches the device.
+static IOService *gPendingHost;
+// Publisher heartbeat: a wait() that never returns looks identical to a wait() that
+// times out, so count the loop iterations and the match attempts.
+static volatile unsigned gWaitTicks, gMatchCalls;
 static unsigned gPending;
 static bool gPendingAttached[4];
 static char gPendingUuid[4][37];
@@ -1963,12 +2136,15 @@ static NativeUfs *gPendingProvider;
 
 static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
 {
+  const bool anyMedia = !uuid || !uuid[0];
   OSDictionary *matching = IOService::serviceMatching ("IOMedia");
   OSDictionary *properties = OSDictionary::withCapacity (1);
-  OSString *wanted = OSString::withCString (uuid);
+  OSString *wanted = anyMedia ? nullptr : OSString::withCString (uuid);
   bool found = false;
-  if (matching && properties && wanted && properties->setObject ("UUID", wanted) &&
-      matching->setObject ("IOPropertyMatch", properties)) {
+  const bool filtered = anyMedia || (matching && properties && wanted &&
+                                     properties->setObject ("UUID", wanted) &&
+                                     matching->setObject ("IOPropertyMatch", properties));
+  if (matching && filtered) {
     OSIterator *iterator = IOService::getMatchingServices (matching);
     if (iterator) {
       for (unsigned matches = 0; matches < 64 && !found; ++matches) {
@@ -1988,6 +2164,403 @@ static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
   OSSafeReleaseNULL (properties);
   OSSafeReleaseNULL (matching);
   return found;
+}
+
+
+// Count what the registry holds right now, without matching the parent chain: a
+// publisher that waits forever looks the same whether the media never appeared or
+// only the ancestry check fails.
+//
+// Why nothing matches (p16): the storage stack is a prelinked Apple kext, and its
+// IOKit personalities reach the IOCatalogue only when the kext is loaded. kextd does
+// that on a normal boot; this kernel stops before any userland runs, so the catalogue
+// holds only the built-in personalities and no IOBlockStorageDriver is ever created
+// for a window device. Without a driver there is no IOMedia, so the partition scheme
+// and APFS have nothing to match either. The workaround loads the family and, when
+// the catalogue still has no match for this device, publishes the two personalities
+// the publication chain needs. Every step is counted so the boot screen can say which
+// one failed.
+static volatile unsigned gStorageKextFlags;   // 1 found, 2 loaded, 4 started, 8 kernel component
+static volatile unsigned gStorageCatalogueBefore, gStorageCatalogueAfter;
+static volatile unsigned gStorageAdded, gStorageLoadResult, gStorageDeviceType;
+static volatile unsigned gApfsService;
+static bool gStorageBootstrapped;
+static unsigned countService (const char *className);
+
+static unsigned kextFlags (const char *identifier)
+{
+  auto kext = OSKext::lookupKextWithIdentifier (identifier);
+  if (!kext) return 0;
+  unsigned flags = 1;
+  if (kext->isLoaded ()) flags |= 2;
+  if (kext->isStarted ()) flags |= 4;
+  if (kext->isKernelComponent ()) flags |= 8;
+  return flags;
+}
+
+// Ask the catalogue which personalities would match this device right now. This is
+// the exact query driver matching performs, so a zero here is the proof that the
+// break is before IOBlockStorageDriver::start, not inside it.
+// Whether a kext class is registered, and how many instances exist. A personality
+// that never instantiates and a class that was never registered look identical in
+// the registry, so both numbers are printed side by side.
+static unsigned classInstances (const char *name, unsigned *registered)
+{
+  const OSSymbol *symbol = OSSymbol::withCString (name);
+  const OSMetaClass *meta = symbol ? OSMetaClass::getMetaClassWithName (symbol) : nullptr;
+  OSSafeReleaseNULL (symbol);
+  if (registered) *registered = meta ? 1u : 0u;
+  return meta ? meta->getInstanceCount () : 0;
+}
+
+static unsigned catalogueMatches (IOService *device)
+{
+  if (!gIOCatalogue || !device) return 0xffffffff;
+  // findDrivers() ends with "*generationCount = getGenerationCount()" and does not
+  // check the pointer: passing nullptr stored to address 0, which is the
+  // "Kernel data abort, far=0, esr=0x96000045" that every build since p29 hit.
+  SInt32 generation = 0;
+  auto drivers = gIOCatalogue->findDrivers (device, &generation);
+  return drivers ? static_cast<unsigned> (drivers->getCount ()) : 0;
+}
+
+static void addStringProperty (OSDictionary *dict, const char *key, const char *value)
+{
+  OSString *string = OSString::withCString (value);
+  if (string) {
+    dict->setObject (key, string);
+    string->release ();
+  }
+}
+
+static bool addPersonality (OSDictionary *personality)
+{
+  OSArray *array = OSArray::withCapacity (1);
+  bool added = false;
+  if (gIOCatalogue && personality && array) {
+    array->setObject (personality);
+    added = gIOCatalogue->addDrivers (array, true);
+  }
+  OSSafeReleaseNULL (array);
+  return added;
+}
+
+// The two personalities this chain needs, copied from the family's Info.plist.
+static bool addBlockStorageDriverPersonality ()
+{
+  OSDictionary *personality = OSDictionary::withCapacity (5);
+  OSDictionary *propertyMatch = OSDictionary::withCapacity (1);
+  bool added = false;
+  if (personality && propertyMatch) {
+    addStringProperty (personality, "CFBundleIdentifier", "com.apple.iokit.IOStorageFamily");
+    addStringProperty (personality, "IOClass", "IOBlockStorageDriver");
+    addStringProperty (personality, "IOProviderClass", "IOBlockStorageDevice");
+    addStringProperty (propertyMatch, "device-type", "Generic");
+    personality->setObject ("IOPropertyMatch", propertyMatch);
+    added = addPersonality (personality);
+  }
+  OSSafeReleaseNULL (propertyMatch);
+  OSSafeReleaseNULL (personality);
+  return added;
+}
+
+static bool addGuidSchemePersonality ()
+{
+  OSDictionary *personality = OSDictionary::withCapacity (6);
+  OSDictionary *propertyMatch = OSDictionary::withCapacity (1);
+  bool added = false;
+  if (personality && propertyMatch) {
+    addStringProperty (personality, "CFBundleIdentifier", "com.apple.iokit.IOStorageFamily");
+    addStringProperty (personality, "IOClass", "IOGUIDPartitionScheme");
+    addStringProperty (personality, "IOProviderClass", "IOMedia");
+    addStringProperty (personality, "IOMatchCategory", "IOStorage");
+    addStringProperty (personality, "Content Mask", "GUID_partition_scheme");
+    propertyMatch->setObject ("Whole", kOSBooleanTrue);
+    personality->setObject ("IOPropertyMatch", propertyMatch);
+    added = addPersonality (personality);
+  }
+  OSSafeReleaseNULL (propertyMatch);
+  OSSafeReleaseNULL (personality);
+  return added;
+}
+
+// The filesystem side of the same chain: a GPT partition whose type is the APFS
+// container GUID is matched by AppleAPFSContainerScheme, which then publishes the
+// container and its volumes. Both personalities come from the apfs kext's plist.
+static bool addContentPersonality (const char *bundle, const char *ioClass, const char *contentHint)
+{
+  OSDictionary *personality = OSDictionary::withCapacity (6);
+  OSDictionary *propertyMatch = OSDictionary::withCapacity (1);
+  bool added = false;
+  if (personality && propertyMatch) {
+    addStringProperty (personality, "CFBundleIdentifier", bundle);
+    addStringProperty (personality, "IOClass", ioClass);
+    addStringProperty (personality, "IOProviderClass", "IOMedia");
+    addStringProperty (personality, "IOMatchCategory", "IOStorage");
+    addStringProperty (propertyMatch, "Content Hint", contentHint);
+    personality->setObject ("IOPropertyMatch", propertyMatch);
+    added = addPersonality (personality);
+  }
+  OSSafeReleaseNULL (propertyMatch);
+  OSSafeReleaseNULL (personality);
+  return added;
+}
+
+// p16 panicked with a data abort (write, far=0) and the panic text scrolled away, so
+// the bring-up is now split into stages that each announce themselves before acting.
+// The panic dump leaves only the last few log lines on screen, so the last "stage N"
+// line names the step that died. native-ufs-storage=<bits> bisects without a kernel
+// rebuild (only the payload carries boot arguments): 1 load the kext,
+// 2 IOBlockStorageDriver, 4 IOGUIDPartitionScheme, 8 APFS container personalities
+// (255 = everything).
+static volatile unsigned gStorageStage, gStorageLevel, gStorageWindow;
+// 1 when the parent meta class really is IOBlockStorageDevice: the bound vtable/metaclass
+// addresses come from the prelinked image, so the class identity has to be checked by
+// name rather than assumed.
+static volatile unsigned gStorageParentOk;
+
+// A panic dump is longer than the screen, so the panic text itself always scrolls off;
+// only the log lines printed immediately before it survive. Running the bring-up at
+// the very end of the report thread therefore makes its stage line readable even when
+// the step crashes: nothing else is printed between it and the dump.
+static bool storageLatePhase ()
+{
+  unsigned phase = 0;
+  PE_parse_boot_argn ("native-ufs-storage-phase", &phase, sizeof (phase));
+  return phase == 1;
+}
+
+// The panic dump is longer than the screen, so a one-shot log line is always pushed
+// out of view before anyone can photograph it. This thread repeats the storage state
+// every two seconds instead: whatever the kernel prints next (a panic dump included),
+// the last line above it is the state we need.
+// Numbers are unreadable in the doubled console font; a name is not.
+static const char *storageStageName (unsigned stage)
+{
+  switch (stage) {
+    case 0: return "none";
+    case 20: return "host";
+    case 21: return "layout";
+    case 22: return "manifest";
+    case 23: return "geom";
+    case 24: return "svcstart";
+    case 25: return "prep";
+    case 30: return "palloc";
+    case 31: return "pinit";
+    case 32: return "pprop";
+    case 33: return "pcfg";
+    case 34: return "phost";
+    case 35: return "pattch";
+    case 36: return "attached";
+    case 40: return "ident";
+    case 42: return "sched";
+    case 51: return "st1probe";
+    case 52: return "st2load";
+    case 53: return "st3driver";
+    case 54: return "st4guid";
+    case 55: return "st5apfs";
+    case 59: return "stdone";
+    default: return "other";
+  }
+}
+
+static void storageHeartbeat (void *, wait_result_t)
+{
+  for (;;) {
+    // Four lines a second: a panic dump is taller than the screen, so this line has to
+    // still be inside the visible window when the dump starts.
+    // The console truncates long lines, so keep every line well under 20 columns and
+    // put the stage name first: the number was unreadable in the doubled font and the
+    // trailing name was cut off.
+    // One value per line: the doubled console font makes multi-field lines unreadable
+    // from a photo, but a single letter plus a single digit always survives.
+    IOLog ("NUS %s\n", storageStageName (gStorageStage));
+    IOLog ("NUK %x\n", gStorageKextFlags);
+    IOLog ("NUL %d\n", gStorageLoadResult);
+    IOLog ("NUC %u\n", gStorageCatalogueAfter);
+    IOLog ("NUA %x\n", gStorageAdded);
+    IOLog ("NUX %u\n", gStorageParentOk);
+    IOSleep (400);
+  }
+}
+
+static void storageHaltIfRequested ()
+{
+  unsigned halt = 0;
+  PE_parse_boot_argn ("native-ufs-storage-halt", &halt, sizeof (halt));
+  if (!halt) return;
+  IOLog ("NativeUfs: storage halt k%x c%u/%u a%x l%d d%u p%u s%u\n",
+         gStorageKextFlags, gStorageCatalogueBefore, gStorageCatalogueAfter,
+         gStorageAdded, gStorageLoadResult, gStorageDeviceType, gApfsService, gStorageStage);
+  for (;;) IOSleep (1000);
+}
+
+static bool gStorageHeartbeatStarted;
+
+static void startStorageHeartbeat ()
+{
+  if (gStorageHeartbeatStarted) return;
+  // The heartbeat is an instrument, and a second thread logging every 400 ms is exactly
+  // the kind of thing that moves a crash around. Off by default: opt in with
+  // native-ufs-heartbeat=1 only when a reading is needed.
+  unsigned enable = 0;
+  PE_parse_boot_argn ("native-ufs-heartbeat", &enable, sizeof (enable));
+  if (!enable) {
+    gStorageHeartbeatStarted = true;
+    return;
+  }
+  gStorageHeartbeatStarted = true;
+  thread_t thread = nullptr;
+  if (kernel_thread_start (storageHeartbeat, nullptr, &thread) == KERN_SUCCESS) {
+    thread_deallocate (thread);
+  }
+}
+
+// Kext probe/load, runnable before any window device exists: the window construction
+// crashes (Kernel data abort inside prepare), and a load attempt scheduled after it
+// never executes. This part answers "can the family be loaded at all" on its own.
+static bool gStorageKextProbed;
+
+static void bootstrapStorageKext ()
+{
+  if (gStorageKextProbed) return;
+  gStorageKextProbed = true;
+  unsigned level = 255;
+  PE_parse_boot_argn ("native-ufs-storage", &level, sizeof (level));
+  gStorageLevel = level;
+  startStorageHeartbeat ();
+  gStorageStage = 51;
+  gStorageKextFlags = kextFlags ("com.apple.iokit.IOStorageFamily");
+  gApfsService = countService ("com_apple_filesystems_apfs");
+  IOLog ("NativeUfs: st1 kext=%x apfs=%u\n", gStorageKextFlags, gApfsService);
+  if (!level) {
+    gStorageStage = 59;
+    return;
+  }
+  // The family is loaded but its personalities never reached the catalogue (the kernel
+  // has no kextd to send them), so publish the ones the chain needs. The classes are
+  // registered now, which is what makes this safe.
+  if (level & 2) {
+    gStorageStage = 53;
+    if (addBlockStorageDriverPersonality ()) gStorageAdded |= 1;
+    if (addGuidSchemePersonality ()) gStorageAdded |= 2;
+    if (!gApfsService) {
+      if (addContentPersonality ("com.apple.filesystems.apfs", "AppleAPFSContainerScheme",
+                                 "7C3457EF-0000-11AA-AA11-00306543ECAC")) gStorageAdded |= 4;
+      if (addContentPersonality ("com.apple.filesystems.apfs", "AppleAPFSContainer",
+                                 "7C3457EF-0000-11AA-AA11-00306543ECAC")) gStorageAdded |= 8;
+    }
+    IOLog ("NativeUfs: st3 added=%x\n", gStorageAdded);
+    gStorageStage = 59;
+    return;
+  }
+  if (gStorageKextFlags & 2) {
+    gStorageStage = 59;
+    return;
+  }
+  gStorageStage = 52;
+  // allowDefer=false: a deferred load reports success and never happens here, because
+  // the kextd that would service the request never runs in this kernel.
+  gStorageLoadResult = static_cast<unsigned> (OSKext::loadKextWithIdentifier ("com.apple.iokit.IOStorageFamily", false));
+  gStorageKextFlags = kextFlags ("com.apple.iokit.IOStorageFamily");
+  IOLog ("NativeUfs: st2 load=%d kext=%x\n", gStorageLoadResult, gStorageKextFlags);
+  gStorageStage = 59;
+}
+
+static void bootstrapStorageMatching (NativeUfsBlock *device)
+{
+  if (gStorageBootstrapped) return;
+  gStorageBootstrapped = true;
+  unsigned level = 255;
+  PE_parse_boot_argn ("native-ufs-storage", &level, sizeof (level));
+  gStorageLevel = level;
+  startStorageHeartbeat ();
+  gStorageStage = 51;
+  IOLog ("NativeUfs: stage 1 probe level=%u\n", level);
+  if (device) {
+    OSString *type = OSString::withCString ("Generic");
+    if (type) {
+      device->setProperty ("device-type", type);
+      type->release ();
+    }
+  }
+  gStorageDeviceType = (device && device->getProperty ("device-type")) ? 1u : 0u;
+  gStorageKextFlags = kextFlags ("com.apple.iokit.IOStorageFamily");
+  gApfsService = countService ("com_apple_filesystems_apfs");
+  gStorageCatalogueBefore = catalogueMatches (device);
+  IOLog ("NativeUfs: stage 1 kext=%x cat=%u devtype=%u apfs=%u\n",
+         gStorageKextFlags, gStorageCatalogueBefore, gStorageDeviceType, gApfsService);
+  if (!level || gStorageCatalogueBefore) return;
+
+  if ((level & 1) && !(gStorageKextFlags & 2)) {
+    gStorageStage = 52;
+    IOLog ("NativeUfs: stage 2 load kext\n");
+    gStorageLoadResult = static_cast<unsigned> (OSKext::loadKextWithIdentifier ("com.apple.iokit.IOStorageFamily", false));
+    gStorageKextFlags = kextFlags ("com.apple.iokit.IOStorageFamily");
+    IOLog ("NativeUfs: stage 2 load=%d kext=%x\n", gStorageLoadResult, gStorageKextFlags);
+  }
+  // A match here proves the personality is in the catalogue; whether a driver object
+  // appears is then decided by instantiation, which the wait loop counts.
+  if (level & 2) {
+    gStorageStage = 53;
+    IOLog ("NativeUfs: stage 3 block driver\n");
+    if (addBlockStorageDriverPersonality ()) gStorageAdded |= 1;
+    IOLog ("NativeUfs: stage 3 cat=%u added=%u\n", catalogueMatches (device), gStorageAdded);
+  }
+  if (level & 4) {
+    gStorageStage = 54;
+    IOLog ("NativeUfs: stage 4 guid scheme\n");
+    if (addGuidSchemePersonality ()) gStorageAdded |= 2;
+    IOLog ("NativeUfs: stage 4 added=%u\n", gStorageAdded);
+  }
+  // Only when APFS does not already answer its own IOResources personality: then the
+  // filesystem kext never ran and its container personalities are missing as well.
+  if ((level & 8) && !gApfsService) {
+    gStorageStage = 55;
+    IOLog ("NativeUfs: stage 5 apfs\n");
+    if (addContentPersonality ("com.apple.filesystems.apfs", "AppleAPFSContainerScheme",
+                               "7C3457EF-0000-11AA-AA11-00306543ECAC")) gStorageAdded |= 4;
+    if (addContentPersonality ("com.apple.filesystems.apfs", "AppleAPFSContainer",
+                               "7C3457EF-0000-11AA-AA11-00306543ECAC")) gStorageAdded |= 8;
+    IOLog ("NativeUfs: stage 5 added=%u\n", gStorageAdded);
+  }
+  gStorageStage = 59;
+  gStorageCatalogueAfter = catalogueMatches (device);
+  IOLog ("NativeUfs: storage done cat=%u/%u added=%u\n",
+         gStorageCatalogueBefore, gStorageCatalogueAfter, gStorageAdded);
+  storageHaltIfRequested ();
+}
+
+static unsigned countService (const char *className)
+{
+  unsigned total = 0;
+  OSDictionary *matching = IOService::serviceMatching (className);
+  OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+  while (iterator && total < 64) {
+    if (!iterator->getNextObject ()) break;
+    total++;
+  }
+  OSSafeReleaseNULL (iterator);
+  OSSafeReleaseNULL (matching);
+  return total;
+}
+
+static unsigned countMedia (const char *uuid, unsigned *uuidMatches)
+{
+  unsigned total = 0, matches = 0;
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+  while (iterator && total < 64) {
+    IOService *media = OSDynamicCast (IOService, iterator->getNextObject ());
+    if (!media) break;
+    total++;
+    OSString *id = OSDynamicCast (OSString, media->getProperty ("UUID"));
+    if (uuid && id && !strcmp (id->getCStringNoCopy (), uuid)) matches++;
+  }
+  OSSafeReleaseNULL (iterator);
+  OSSafeReleaseNULL (matching);
+  if (uuidMatches) *uuidMatches = matches;
+  return total;
 }
 
 static void captureMissingMedia (const char *uuid)
@@ -2031,8 +2604,21 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.stage = "root window service start";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Start);
       gRootDiagnostic.publicationWindow = index;
-      if (!device->start (gPendingProvider)) return false;
+      IOService *host = gPendingHost ? gPendingHost : gPendingProvider;
+      // Virtual call: NativeUfsBlock::start() is what registers the service. The
+      // qualified base call tried while hunting the write fault, but that fault was
+      // findDrivers(NULL) and had nothing to do with dispatch; without registerService()
+      // the storage family can never match this device.
+      if (!device->start (host)) return false;
+      publishNativeBdev ();
+      // Register the storage personalities only after the device completed its
+      // own start: loading them first let the driver attach from inside start and
+      // deadlock the publisher (p84, start=1 for 30 s).
+      if (!storageLatePhase ()) bootstrapStorageMatching (device);
       native_ufs_blocks_published = native_ufs_blocks_published + 1;
+      IOLog ("NU4 i%u c%u/%u a%x k%x l%d d%u p%u s%u\n", index,
+             gStorageCatalogueBefore, gStorageCatalogueAfter, gStorageAdded, gStorageKextFlags,
+             gStorageLoadResult, gStorageDeviceType, gApfsService, gStorageStage);
       IOLog ("NativeUfs: published %s\n", device->windowLabel ());
       return true;
     }
@@ -2044,10 +2630,37 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.publicationWindow = index;
       bool ready = false;
       // Diagnostic mode affects reporting only, never the dependency gate.
-      for (unsigned tick = 0; tick <= 300; ++tick) {
+      // native-ufs-wait-ticks shortens the media wait while bisecting (the published
+      // windows never appear as IOMedia on this port, so the full wait only delays
+      // the bdevsw root handoff).
+      unsigned limit = 300;
+      PE_parse_boot_argn ("native-ufs-wait-ticks", &limit, sizeof (limit));
+      if (limit > 300) limit = 300;
+      for (unsigned tick = 0; tick <= limit; ++tick) {
+        gWaitTicks = gWaitTicks + 1;
+        gMatchCalls = gMatchCalls + 1;
+        // One short line every ten seconds: enough to show the loop is alive, and quiet
+        // enough that the earlier mount handoff lines stay on screen for a photograph.
+        if ((tick % 10) == 0) {
+          IOLog ("NU5 i%u t%u c%u/%u a%x s%u\n", index, tick,
+                 gStorageCatalogueBefore, gStorageCatalogueAfter, gStorageAdded, gStorageStage);
+        }
         ready = mediaWithUuidExists (uuid, device);
-        if (ready || tick == 300) break;
-        IOSleep (100);
+        if (!ready && (tick % 10) == 9) {
+          unsigned uuidMatches = 0;
+          unsigned driverRegistered = 0, schemeRegistered = 0;
+          unsigned driverInstances = classInstances ("IOBlockStorageDriver", &driverRegistered);
+          unsigned schemeInstances = classInstances ("IOGUIDPartitionScheme", &schemeRegistered);
+          IOLog ("NU9 cls=%u/%u inst=%u/%u\n", driverRegistered, schemeRegistered,
+                 driverInstances, schemeInstances);
+          unsigned total = countMedia (uuid, &uuidMatches);
+          IOLog ("NativeUfs: waiting %s %us media=%u uuidMatches=%u drivers=%u schemes=%u devices=%u cat=%u kext=%x\n",
+                 uuid, (tick + 1) / 10, total, uuidMatches,
+                 countService ("IOBlockStorageDriver"), countService ("IOGUIDPartitionScheme"),
+                 countService ("IOBlockStorageDevice"), catalogueMatches (device), gStorageKextFlags);
+        }
+        if (ready || tick == limit) break;
+        IOSleep (1000);
       }
       IOLog ("NativeUfs: %s volume %s %s\n", device->windowLabel (), uuid, ready ? "ready" : "not ready");
       if (!ready) captureMissingMedia (uuid);
@@ -2091,9 +2704,200 @@ static void statsThread (void *argument, wait_result_t)
          memorystatus_available_pages, max_mem, nprocs, native_ufs_block_reads);
 }
 
+// Publication snapshot (native-ufs-probe=15): root mode, then a thread that sleeps a
+// few seconds and panics with the publication state. A stalled publisher produces no
+// log line at all, so the only way to see where it stopped is to interrupt it from
+// another thread.
+static void publicationReportThread (void *, wait_result_t)
+{
+  unsigned delay = 10;
+  PE_parse_boot_argn ("native-ufs-report-delay", &delay, sizeof (delay));
+  IOSleep (delay * 1000);
+  if (storageLatePhase ()) {
+    NativeUfsBlock *device = gPendingDevice[0] ? gPendingDevice[0] : gPendingDevice[1];
+    bootstrapStorageMatching (device);
+    panic ("NATIVE_UFS storage report\nstg=%u cat=%u/%u added=%u kext=%x load=%d devtype=%u apfs=%u lvl=%u\n",
+           gStorageStage, gStorageCatalogueBefore, gStorageCatalogueAfter, gStorageAdded,
+           gStorageKextFlags, gStorageLoadResult, gStorageDeviceType, gApfsService, gStorageLevel);
+  }
+  unsigned window = gRootDiagnostic.publicationWindow & 3;
+  char wanted[37] = {};
+  strlcpy (wanted, gPendingUuid[window], sizeof (wanted));
+  // Enumerate from this thread: if the publisher is wedged inside the registry, this
+  // thread can still report what the registry holds.
+  captureMissingMedia (wanted);
+  panic ("NATIVE_UFS publication report\n"
+         "pubPhase=%u pubWindow=%u published=%u pending=%u prepared=%u\n"
+         "windowBytes=%llx reads=%llu failures=%llu stage=%s\n"
+         "waitTicks=%u matchCalls=%u diag=%u start=%u wanted=%s\n"
+         "dev=%u,%u,%u,%u,%u,%u bdev=%d node=%lx test=%d magic=%x scan=%d mnt=%d\n"
+         "bdevio=%u/%u/%u/%u/%u rootdev=%d major=%d bounce=%d blocks=%llx\n"
+         "kext=%x cat=%u/%u added=%u load=%d devtype=%u apfs=%u stg=%u lvl=%u\n%s",
+         gRootDiagnostic.publicationPhase, gRootDiagnostic.publicationWindow,
+         native_ufs_blocks_published, gPending, gRootDiagnostic.prepared,
+         (unsigned long long) gRootDiagnostic.windowBytes,
+         (unsigned long long) native_ufs_block_reads,
+         (unsigned long long) native_ufs_block_failures, gRootDiagnostic.stage,
+         gWaitTicks, gMatchCalls, gRootDiagnosticEnabled ? 1u : 0u, gStartCheckpoint, wanted,
+         gDeviceCalls[0], gDeviceCalls[1], gDeviceCalls[2], gDeviceCalls[3], gDeviceCalls[4],
+         gDeviceCalls[5], gBdevSlot, (unsigned long) gBdevNode, gBdevTestError, gBdevMagic, gBdevScan, gRootMountError,
+         gBdevIoctlSize, gBdevIoctlSetSize, gBdevIoctlCount, gBdevIoctlCalls, gBdevIoctlOther,
+         gRootMountDev, gRootMountMajor, gBdevSlot >= 0 ? 1 : 0, (unsigned long long) gBdevBytes,
+         gStorageKextFlags, gStorageCatalogueBefore, gStorageCatalogueAfter,
+         gStorageAdded, gStorageLoadResult, gStorageDeviceType, gApfsService,
+         gStorageStage, gStorageLevel, gRootMediaText);
+}
+
 // Storage discovery report (native-ufs-probe=12): a separate thread waits for the original
 // IOStorageFamily to publish IOMedia for the root windows, then shows what exists on the screen.
 // It must not run inside the matching thread that is starting NativeUfs.
+// BSD block device publication. IOStorageFamily is a prelinked binary whose
+// start either blocks the publisher or leaves the driver without an instance,
+// so the window is exposed through bdevsw and devfs instead.
+
+static int nativeBdevOpen (dev_t, int, int, struct proc *) { return 0; }
+static int nativeBdevClose (dev_t, int, int, struct proc *) { return 0; }
+// spec_open() (bsd/miscfs/specfs/spec_vnops.c) opens a block device and then asks it
+// for its block size, switches it to 512 to read the block count, and switches it
+// back. A GET or SET that fails turns the open into ENXIO, which is what made
+// bdevvp() panic and what kept vfs_mountroot() from ever running.
+static int nativeBdevIoctl (dev_t, u_long command, caddr_t data, int, struct proc *)
+{
+  if (!data) return EINVAL;
+  gBdevIoctlCalls++;
+  switch (command) {
+    case DKIOCGETBLOCKSIZE:
+      *reinterpret_cast<uint32_t *> (data) = gBdevBlockSize;
+      gBdevIoctlSize++;
+      return 0;
+    case DKIOCSETBLOCKSIZE: {
+      uint32_t requested = *reinterpret_cast<uint32_t *> (data);
+      gBdevIoctlSetSize++;
+      // spec_open only asks for 512 (its DEV_BSIZE) and then back to the size we
+      // reported; anything else would silently change the sector geometry.
+      return (requested == 512 || requested == gBdevBlockSize) ? 0 : EINVAL;
+    }
+    case DKIOCGETBLOCKCOUNT:
+      *reinterpret_cast<uint64_t *> (data) = gBdevBytes / 512;
+      gBdevIoctlCount++;
+      return 0;
+    default:
+      gBdevIoctlOther++;
+      return EINVAL;
+  }
+}
+static int nativeBdevPsize (dev_t) { return gBdevBlockSize; }
+static uint8_t *gBdevBounce = nullptr;
+
+// The iOS OS window is a whole-disk image: a GPT whose single Apple_APFS partition
+// holds the container the kernel mounts. The bdevsw device must start at that
+// partition, not at the partition table in front of it, or APFS reads the GPT and
+// reports ENOENT. Windows whose first blocks are not such a GPT are left alone.
+// The disk image inside the window uses 512-byte GPT sectors (the dmg format), while
+// hostRead4k moves 4096-byte blocks: the GPT header sits at byte 512 of the window and
+// the entry array at byte 1024, both inside the first 4 KiB block.
+static void skipLeadingApfsGpt (uint64_t *absolute, uint64_t *bytes)
+{
+  static const uint8_t apfsType[16] = { 0xef, 0x57, 0x34, 0x7c, 0x00, 0x00, 0xaa, 0x11,
+                                        0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac };
+  if (!absolute || !bytes || !*bytes || (*absolute & 4095)) return;
+  const uint64_t baseLba = *absolute / 4096;
+  if (hostRead4k (0, baseLba, 1, gScratch) != kIOReturnSuccess) {
+    IOLog ("NativeUfs: gpt probe: first block read failed\n");
+    return;
+  }
+  if (memcmp (gScratch + 512, "EFI PART", 8) != 0) return;
+  uint64_t entriesLba = le64 (gScratch + 512 + 72);
+  uint32_t count = le32 (gScratch + 512 + 80), size = le32 (gScratch + 512 + 84);
+  if (!count || !size || size > 512 || entriesLba < 2) return;
+  uint64_t entriesByte = entriesLba * 512;
+  uint64_t needBytes = entriesByte + uint64_t (count) * size;
+  uint32_t blocks = static_cast<uint32_t> ((needBytes + 4095) / 4096);
+  if (!blocks || blocks > kDataMax / 4096) return;
+  if (hostRead4k (0, baseLba, blocks, gScratch) != kIOReturnSuccess) return;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint8_t *entry = gScratch + entriesByte + uint64_t (i) * size;
+    if (memcmp (entry, apfsType, 16) != 0) continue;
+    uint64_t first = le64 (entry + 32), last = le64 (entry + 40);
+    if (last <= first) return;
+    uint64_t offset = first * 512, length = (last - first + 1) * 512;
+    if (offset >= *bytes || length > *bytes - offset) return;
+    IOLog ("NativeUfs: bdev skips GPT, APFS partition at +%llx (%llu bytes)\n",
+           static_cast<unsigned long long> (offset), static_cast<unsigned long long> (length));
+    *absolute += offset;
+    *bytes = length;
+    return;
+  }
+  IOLog ("NativeUfs: gpt probe: no Apple_APFS entry among %u\n", count);
+}
+
+
+static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
+{
+  if (!gBdevBounce || !data || !count || (count & 511) ||
+      block >= gBdevBytes / 512 || count > gBdevBytes - block * 512) return EINVAL;
+  uint64_t start = block * 512, done = 0;
+  while (done < count) {
+    uint64_t lba = (gBdevAbsolute + start + done) / 4096;
+    uint64_t skip = (gBdevAbsolute + start + done) % 4096;
+    uint64_t blocks = (skip + count - done + 4095) / 4096;
+    if (blocks > kDataMax / 4096) blocks = kDataMax / 4096;
+    if (hostRead4k (0, lba, static_cast<uint32_t> (blocks), gBdevBounce) != kIOReturnSuccess)
+      return EIO;
+    uint64_t usable = blocks * 4096 - skip;
+    if (usable > count - done) usable = count - done;
+    memcpy (data + done, gBdevBounce + skip, static_cast<size_t> (usable));
+    done += usable;
+    __atomic_fetch_add (&native_ufs_block_reads, 1, __ATOMIC_RELAXED);
+  }
+  return 0;
+}
+
+static void nativeBdevStrategy (struct buf *bp)
+{
+  uint64_t block = buf_blkno (bp);
+  uint32_t count = buf_count (bp);
+  int error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (buf_dataptr (bp)));
+  if (error) {
+    buf_setresid (bp, count);
+    __atomic_fetch_add (&native_ufs_block_failures, 1, __ATOMIC_RELAXED);
+  } else {
+    buf_setresid (bp, 0);
+  }
+  buf_biodone (bp);
+}
+
+static void publishNativeBdev ()
+{
+  if (gBdevSlot != -2) return;
+  static struct bdevsw operations = { nativeBdevOpen, nativeBdevClose, nativeBdevStrategy,
+                                      nativeBdevIoctl, enodev, nativeBdevPsize, D_DISK };
+  int slot = bdevsw_add (-1, &operations);
+  gBdevSlot = slot;
+  if (slot < 0) return;
+  // gBdevAbsolute/gBdevBytes come from the parsed layout (userdata start); do not
+  // overwrite them here or the read test sees the wrong window.
+  gBdevBounce = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  thread_t thread = nullptr;
+  if (kernel_thread_start (bdevTestThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate (thread);
+  dev_t dev = makedev (slot, 0);
+  // Publish the device number as the kernel's root before anything else: IOFindBSDRoot
+  // (peridot-bdevsw-root.patch) adopts rootdev when it is a registered bdevsw disk, so
+  // this must hold even when the mount thread is not requested.
+  rootdev = dev;
+  native_ufs_bdev_absolute = gBdevAbsolute;
+  native_ufs_bdev_bytes = gBdevBytes;
+  gBdevNode = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "disk0"));
+  // native-ufs-mountroot=1 runs the real mountroot once the bdevsw contract is met.
+  // Off by default: bdevvp() panics when the open is refused and a panic here resets
+  // the device.
+  unsigned mountroot = 0;
+  PE_parse_boot_argn ("native-ufs-mountroot", &mountroot, sizeof (mountroot));
+  if (mountroot == 1) {
+    if (kernel_thread_start (mountRootThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate (thread);
+  }
+}
+
 static char gMediaReport[3000];
 
 static void mediaReportThread (void *, wait_result_t)
@@ -2151,6 +2955,9 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
   native_ufs_probe_requested = probe != 0;
+  unsigned allowUnverified = 0;
+  PE_parse_boot_argn ("native-ufs-allow-unverified", &allowUnverified, sizeof (allowUnverified));
+  gAllowUnverifiedRoot = allowUnverified == 1;
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
@@ -2206,6 +3013,10 @@ bool NativeUfs::start (IOService *provider)
     uint32_t seen[4] = {};
     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      // The published window is what /dev/disk0 exposes: its first bytes hold the
+      // APFS container superblock, not the SHNGROOT manifest.
+      gBdevAbsolute = absolute;
+      gBdevBytes = layout->window[index].size;
       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
         seen[index] = 1;
         sig[index][0] = le32 (gScratch + 512);
@@ -2233,6 +3044,50 @@ bool NativeUfs::start (IOService *provider)
            vm_page_wire_count, vm_page_speculative_count, vm_page_purgeable_count,
            memorystatus_available_pages, max_mem, nprocs);
   }
+  if (probe == 17) {
+    // bdevsw contract test that does not need the root image: bring the transport up,
+    // publish one window as /dev/disk0 (default: the 128 MiB payload region at the end of
+    // userdata, which the UEFI side already reads as FAT) and, with
+    // native-ufs-mountroot=1, hand it to vfs_mountroot().
+    const char *why = "";
+    if (!hostBringUp (&why)) {
+      panic ("NATIVE_UFS bdev probe: bring-up failed: %s", why);
+    }
+    unsigned windowIndex = 0;
+    PE_parse_boot_argn ("native-ufs-bdev-window", &windowIndex, sizeof (windowIndex));
+    gBdevAbsolute = 516746620928ULL;
+    gBdevBytes = 134217728ULL;
+    RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+    if (layout && findRootLayout (layout, &why) && layout->manifestStatus == 0 &&
+        windowIndex < layout->windows) {
+      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[windowIndex].offset;
+      uint64_t bytes = layout->window[windowIndex].size;
+      skipLeadingApfsGpt (&absolute, &bytes);
+      gBdevAbsolute = absolute;
+      gBdevBytes = bytes;
+      IOLog ("NATIVE_UFS bdev probe: window %u '%s' abs=%llx bytes=%llx\n", windowIndex,
+             layout->window[windowIndex].name,
+             static_cast<unsigned long long> (absolute),
+             static_cast<unsigned long long> (bytes));
+    } else {
+      IOLog ("NATIVE_UFS bdev probe: no usable manifest, publishing the payload region\n");
+    }
+    if (layout) IOFree (layout, sizeof (RootLayout));
+    publishNativeBdev ();
+    // APFS reads metadata scattered across the whole container, so prove the transport
+    // serves it beyond the first block before blaming the filesystem.
+    static const uint64_t probeOffsets[4] = { 0, 4ULL << 20, 64ULL << 20, 1ULL << 30 };
+    for (unsigned probe = 0; probe < 4; probe++) {
+      uint8_t *buf = static_cast<uint8_t *> (IOMalloc (4096));
+      if (!buf) break;
+      int result = nativeBdevRead (probeOffsets[probe] / 512, 4096, buf);
+      IOLog ("NATIVE_UFS bdev read +%llx: status=%d first=%02x%02x%02x%02x\n",
+             static_cast<unsigned long long> (probeOffsets[probe]), result,
+             buf[0], buf[1], buf[2], buf[3]);
+      IOFree (buf, 4096);
+    }
+    return true;
+  }
   if (probe == 13) {
     unsigned delay = 12;
     PE_parse_boot_argn ("native-ufs-stats-delay", &delay, sizeof (delay));
@@ -2242,6 +3097,36 @@ bool NativeUfs::start (IOService *provider)
     thread_t thread = nullptr;
     if (kernel_thread_start (statsThread, reinterpret_cast<void *> (static_cast<uintptr_t> (delay)), &thread) != KERN_SUCCESS) {
       panic ("NATIVE_UFS memory snapshot: cannot start the thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  IOLog ("NU0 p%u\n", probe);
+  if (probe == 16) {
+    // Diagnostics first: render the previous boot's log tail through the panic screen.
+    // Panic text after the first line starts at column 0, so it is not cut by the console
+    // width, unlike a plain printf of the same text.
+    unsigned printLog = 0;
+    PE_parse_boot_argn ("native-ufs-print-last-log", &printLog, sizeof (printLog));
+    if (printLog) {
+      // Short lines first: these fit the console even when the panic dump does not.
+      IOLog ("NUPRG %u\n", (unsigned) gPanicSize);
+      IOLog ("NUPM %x\n", (gPanicBase && gPanicSize >= 4) ? *(volatile unsigned int *) gPanicBase : 0u);
+      pe_panic_last_log ();
+    }
+    // Unverified bring-up publication (muyu's mode): publish the root windows without the
+    // owner policy and let the publisher accept any media below them.
+    gAllowUnverifiedRoot = true;
+    return startRoot (provider);
+  }
+  if (probe == 15) {
+    bootstrapStorageKext ();
+    if (!startRoot (provider)) {
+      panic ("NATIVE_UFS publication report: root start failed (blocks=%u)", native_ufs_blocks_published);
+    }
+    thread_t thread = nullptr;
+    if (kernel_thread_start (publicationReportThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS publication report: cannot start the thread");
     }
     thread_deallocate (thread);
     return true;
@@ -2269,12 +3154,14 @@ bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
   native_ufs_root_step = 1;
+  gStorageStage = 20;
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
     return false;
   }
   native_ufs_root_step = 2;
+  gStorageStage = 21;
   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
   if (!layout || !findRootLayout (layout, &why)) {
     rootDiagnosticFailure (layout ? why : "root layout allocation failed");
@@ -2283,6 +3170,7 @@ bool NativeUfs::startRoot (IOService *provider)
     return false;
   }
   native_ufs_root_step = 3;
+  gStorageStage = 22;
   if (layout->manifestStatus != 0) {
     rootDiagnosticFailure ("root manifest rejected");
     IOLog ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
@@ -2290,11 +3178,13 @@ bool NativeUfs::startRoot (IOService *provider)
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
+  gStorageStage = 23;
   gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
                      layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
   gRootObjects = layout->objects;
   for (unsigned i = 0; i < layout->objects; ++i) gRootObject[i] = layout->object[i];
   gRootObjectBase = layout->userdataFirst * 4096ULL;
+
   const char *names[4] = {};
   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {
@@ -2302,18 +3192,23 @@ bool NativeUfs::startRoot (IOService *provider)
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
+  gStorageStage = 24;
   if (!IOService::start (provider)) {
     rootDiagnosticFailure ("root IOService start failed");
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
   // Prepare all windows or publish none. Diagnostics never decide policy.
+  gStorageStage = 25;
   gPending = 0;
   gPendingProvider = this;
   struct Operations {
     NativeUfs *owner;
     RootLayout *layout;
     bool prepare (unsigned index) {
+      gStorageWindow = index;
+      gStorageStage = 30;
+      gPrepStage = 0;
       gRootDiagnostic.stage = "root window allocation/configuration";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
       gRootDiagnostic.publicationWindow = index;
@@ -2323,23 +3218,100 @@ bool NativeUfs::startRoot (IOService *provider)
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      {
+        // Publish the container, not the partition table in front of it: the iOS OS
+        // window is a whole-disk image whose first Apple_APFS partition holds the
+        // container APFS has to mount.
+        uint64_t bdevAbsolute = absolute;
+        uint64_t bdevBytes = layout->window[index].size;
+        skipLeadingApfsGpt (&bdevAbsolute, &bdevBytes);
+        gBdevAbsolute = bdevAbsolute;
+        gBdevBytes = bdevBytes;
+      }
+      // Back to the p15e form: the extra property table and the explicit device-type
+      // write are the only differences from the boot that did reach "published SystemOS".
+      // The property is set in the storage bring-up instead, right before matching.
       if (!device || !device->init (static_cast<OSDictionary *> (nullptr))) return false;
-      if (!device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+      gStorageStage = 31;
+      // The personality matches on this exact property (Info.plist IOPropertyMatch).
+      // Use an OSString: the plain const char* overload left the property missing, which
+      // is why the catalogue match stayed at 0 even with the personalities registered.
+      OSString *generic = OSString::withCString ("Generic");
+      if (generic) {
+        device->setProperty ("device-type", generic);
+        generic->release ();
+      }
+      gStorageCatalogueAfter = catalogueMatches (device);
+      const OSMetaClass *meta = device->getMetaClass ();
+      const OSMetaClass *parent = meta ? meta->getSuperClass () : nullptr;
+      gStorageParentOk = (parent && parent->getClassName () && !strcmp (parent->getClassName (), "IOBlockStorageDevice")) ? 1u : 0u;
+      IOLog ("NativeUfs: dt=%u match=%u\n",
+             device->getProperty ("device-type") ? 1u : 0u, gStorageCatalogueAfter);
+      gStorageStage = 32;
+      gPrepStage = 1;
+      // native-ufs-prepare bisects the three calls that make a window device:
+      // 1 = init+configure+attach, 2 = init+attach, 3 = init only.
+      unsigned mode = 1;
+      PE_parse_boot_argn ("native-ufs-prepare", &mode, sizeof (mode));
+      if (mode <= 1 &&
+          !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+      gStorageStage = 33;
+      gPrepStage = 2;
+      if (mode >= 3) {
+        gStorageStage = 36;
+        return true;
+      }
       gRootDiagnostic.stage = "root window attachment";
-      if (!device->attach (owner)) return false;
+      // muyu's chain: the window is a child of this NativeUfs, and start() is called with
+      // the same object. Attaching to IOPlatformExpert instead broke that chain and is the
+      // one structural difference from the port that reaches the UI.
+      IOService *host = owner;
+      gStorageStage = 34;
+      gPrepStage = 3;
+      if (mode <= 2 && (!host || !device->attach (host))) return false;
+      // Walk to the root of the IOService plane: registerService() requires it, and a
+      // detached object looks the same as a refused one in the log.
+      {
+        unsigned depth = 0;
+        IORegistryEntry *entry = device;
+        while (entry && depth < 24) {
+          entry = entry->getParentEntry (gIOServicePlane);
+          depth++;
+        }
+        IOLog ("NU7 d%u r%u\n", depth, entry ? 1u : 0u);
+      }
+      gStorageStage = 35;
+      gPendingHost = host;
+      gPrepStage = 4;
+      gStorageStage = 36;
       gPendingAttached[index] = true;
       ++gPending;
       gRootDiagnostic.prepared = gPending;
       return true;
     }
     bool validate () {
+      gStorageStage = 40;
       gRootDiagnostic.stage = "signed window identities";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Identity);
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
+      if (gAllowUnverifiedRoot) {
+        // Bring-up: no signed identity. Empty UUIDs make the publisher wait for any media
+        // descendant of each window, exactly like the muyu port's unverified mode.
+        for (unsigned i = 0; i < gPending; ++i) gPendingUuid[i][0] = 0;
+        return true;
+      }
       for (unsigned i = 0; i < gPending; ++i) {
         gRootDiagnostic.publicationWindow = i;
-        if (!gPendingDevice[i]->signedVolumeUuid (gPendingUuid[i])) return false;
-        for (unsigned j = 0; j < i; ++j) if (!strcmp (gPendingUuid[i], gPendingUuid[j])) return false;
+        if (!gPendingDevice[i]->signedVolumeUuid (gPendingUuid[i])) {
+          panic ("VRFAIL signedVolumeUuid window=%u files=%u", i, gPending);
+          return false;
+        }
+        for (unsigned j = 0; j < i; ++j) {
+          if (!strcmp (gPendingUuid[i], gPendingUuid[j])) {
+            panic ("VRFAIL duplicate uuid w%u=%s w%u=%s", i, gPendingUuid[i], j, gPendingUuid[j]);
+            return false;
+          }
+        }
       }
       return true;
 #else
@@ -2347,6 +3319,7 @@ bool NativeUfs::startRoot (IOService *provider)
 #endif
     }
     bool schedule () {
+      gStorageStage = 42;
       gRootDiagnostic.stage = "root publisher thread";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Schedule);
       gRootDiagnostic.publicationWindow = 0xffffffff;
@@ -2369,6 +3342,10 @@ bool NativeUfs::startRoot (IOService *provider)
       result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError;
     IOLog ("NativeUfs: root preparation failed phase=%u window=%u; nothing published\n",
            static_cast<unsigned> (result.phase), result.index);
+  panic ("PUBFAIL phase=%u index=%u stage=%u reason=%s verify=%x policies=%llu bytes=%llx",
+         static_cast<unsigned> (result.phase), result.index, gPrepStage, gRootDiagnostic.stage,
+         gRootDiagnostic.verify, (unsigned long long) gRootDiagnostic.policyCount,
+         (unsigned long long) gRootDiagnostic.windowBytes);
     IOService::stop (provider);
     rootDiagnosticFailure (result.phase == UfsRootPhase::Schedule ? "root publisher thread creation failed" :
                           result.phase == UfsRootPhase::Identity ? "signed window identities rejected" :

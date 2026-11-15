@@ -1,6 +1,63 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index e6d38d3..5138e2c 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -251,6 +251,9 @@ get_cons_ops_index(void)
+ static inline void
+ _cnputc(char c, bool poll)
+ {
++	/* peridot: draw on the GOP frame buffer */
++	extern void peridot_fb_putc(char c);
++	peridot_fb_putc(c);
+ 	bool in_debugger = (kernel_debugger_entry_count > 0);
+ 	const uint32_t idx = get_cons_ops_index();
+ 
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 4c1edf1..f1f23ec 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -160,12 +160,12 @@ MACRO_END
+ 
+ #define VCPUTC_LOCK_LOCK()                              \
+ MACRO_BEGIN                                             \
+-	lck_ticket_lock(&vcputc_lock, &vconsole_lck_grp);   \
++	/* peridot: vconsole_lck_grp is not initialised yet */ \
+ MACRO_END
+ 
+ #define VCPUTC_LOCK_UNLOCK()                            \
+ MACRO_BEGIN                                             \
+-	lck_ticket_unlock(&vcputc_lock);                    \
++	/* peridot: paired with the no-op above */ \
+ MACRO_END
+ 
+ 
+@@ -1230,6 +1230,11 @@ gc_update_color(int color, boolean_t fore)
+ void
+ vcputc_options(char c, __unused bool poll)
+ {
++	/* peridot: draw on the GOP frame buffer and stop; vcputc_lock has */
++	/* no lock group until vcinit() runs.                              */
++	extern void peridot_fb_putc(char c);
++	peridot_fb_putc(c);
++	return;
+ 	if (gc_initialized && gc_enabled) {
+ 		VCPUTC_LOCK_LOCK();
+ 		if (gc_enabled) {
+@@ -1247,6 +1252,9 @@ vcputc_options(char c, __unused bool poll)
+ void
+ vcputc(char c)
+ {
++	extern void peridot_fb_putc(char c);
++	peridot_fb_putc(c);
++	return;
+ 	vcputc_options(c, false);
+ }
+ 
+diff --git a/pexpert/gen/pe_gen.c b/pexpert/gen/pe_gen.c
+index d7aa881..d1527a0 100644
 --- a/pexpert/gen/pe_gen.c
 +++ b/pexpert/gen/pe_gen.c
-@@ -131,11 +131,141 @@
+@@ -131,11 +131,141 @@ SECURITY_READ_ONLY_LATE(PE_putc_t) PE_putc;
  
  extern void console_write_char(char);
  
@@ -143,56 +200,3 @@
  	} else {
  		/* peridot: no video console yet; vcattach() would stall here */
  	}
---- a/osfmk/console/serial_console.c
-+++ b/osfmk/console/serial_console.c
-@@ -251,6 +251,9 @@
- static inline void
- _cnputc(char c, bool poll)
- {
-+	/* peridot: draw on the GOP frame buffer */
-+	extern void peridot_fb_putc(char c);
-+	peridot_fb_putc(c);
- 	bool in_debugger = (kernel_debugger_entry_count > 0);
- 	const uint32_t idx = get_cons_ops_index();
- 
---- a/osfmk/console/video_console.c
-+++ b/osfmk/console/video_console.c
-@@ -1230,6 +1230,11 @@
- void
- vcputc_options(char c, __unused bool poll)
- {
-+	/* peridot: draw on the GOP frame buffer and stop; vcputc_lock has */
-+	/* no lock group until vcinit() runs.                              */
-+	extern void peridot_fb_putc(char c);
-+	peridot_fb_putc(c);
-+	return;
- 	if (gc_initialized && gc_enabled) {
- 		VCPUTC_LOCK_LOCK();
- 		if (gc_enabled) {
-@@ -1247,6 +1252,9 @@
- void
- vcputc(char c)
- {
-+	extern void peridot_fb_putc(char c);
-+	peridot_fb_putc(c);
-+	return;
- 	vcputc_options(c, false);
- }
- 
---- a/osfmk/console/video_console.c
-+++ b/osfmk/console/video_console.c
-@@ -160,12 +160,12 @@
- 
- #define VCPUTC_LOCK_LOCK()                              \
- MACRO_BEGIN                                             \
--	lck_ticket_lock(&vcputc_lock, &vconsole_lck_grp);   \
-+	/* peridot: vconsole_lck_grp is not initialised yet */ \
- MACRO_END
- 
- #define VCPUTC_LOCK_UNLOCK()                            \
- MACRO_BEGIN                                             \
--	lck_ticket_unlock(&vcputc_lock);                    \
-+	/* peridot: paired with the no-op above */ \
- MACRO_END
- 
- 

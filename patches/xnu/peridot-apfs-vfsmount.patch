@@ -1,0 +1,44 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -79,6 +79,7 @@
+ 
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <pexpert/pexpert.h>
+ #include <sys/proc_internal.h>
+ #include <sys/kauth.h>
+ #include <sys/mount_internal.h>
+@@ -1206,6 +1207,22 @@
+  */
+ extern int (*mountroot)(void);
+ 
++/* peridot: mount the APFS volume directly instead of through apfs_vfsop_mountroot(),
++ * which mounts the sealed root snapshot. The IPSW image on this port has no such
++ * snapshot; mounting the volume itself is what proves the storage path. */
++static int peridot_apfs_vfsmount = -1;
++
++static boolean_t
++peridot_apfs_vfsmount_enabled(void)
++{
++	if (peridot_apfs_vfsmount < 0) {
++		int value = 0;
++		PE_parse_boot_argn("peridot-apfs-vfsmount", &value, sizeof(value));
++		peridot_apfs_vfsmount = value == 1;
++	}
++	return peridot_apfs_vfsmount != 0;
++}
++
+ int
+ vfs_mountroot(void)
+ {
+@@ -1258,7 +1275,9 @@
+ 		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
+ 		mp->mnt_devvp = rootvp;
+ 
+-		if (vfsp->vfc_mountroot) {
++		if (peridot_apfs_vfsmount_enabled() && strcmp(vfsp->vfc_name, "apfs") == 0) {
++			error = VFS_MOUNT(mp, rootvp, 0, ctx);
++		} else if (vfsp->vfc_mountroot) {
+ 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);
+ 		} else {
+ 			error = VFS_MOUNT(mp, rootvp, 0, ctx);

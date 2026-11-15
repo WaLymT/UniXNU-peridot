@@ -18,3 +18,10 @@ commit = "TODO-40-CHARACTER-COMMIT"
 name = "ShengUfs"
 kind = "driver"
 local = "drivers/ShengUfs"
+
+# Adreno735 is the peridot GPU driver skeleton: it calls the SM8635 platform kit
+# and stops before the GMU. Vendored locally for the same reason as ShengUfs.
+[[source]]
+name = "Adreno735"
+kind = "driver"
+local = "drivers/Adreno735"

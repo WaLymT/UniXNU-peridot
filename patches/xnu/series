@@ -1,3 +1,4 @@
+sheng-platform-power.patch
 native-smp-secondary.patch
 peridot-cpu-clusters.patch
 peridot-no-pi3-uart.patch
@@ -5,3 +6,10 @@ peridot-defer-console.patch
 peridot-fb-console.patch
 peridot-iodt-guard.patch
 peridot-vc-guard.patch
+peridot-last-panic-print.patch
+peridot-panic-bootargs.patch
+peridot-console-single-draw.patch
+peridot-ossymbol-caller.patch
+peridot-bdevsw-root.patch
+peridot-apfs-vfsmount.patch
+peridot-exec-diag.patch

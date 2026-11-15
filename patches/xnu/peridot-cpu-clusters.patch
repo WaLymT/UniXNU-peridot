@@ -1,7 +1,8 @@
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+index 0519589..25f137a 100644
 --- a/pexpert/pexpert/arm64/board_config.h
 +++ b/pexpert/pexpert/arm64/board_config.h
-@@ -134,7 +134,7 @@
- #include <pexpert/arm64/BCM2837.h>
+@@ -135,7 +135,7 @@
  
  #define MAX_L2_CLINE                   6
  #define MAX_CPUS                       8 /* sheng: SM8550 has eight cores */

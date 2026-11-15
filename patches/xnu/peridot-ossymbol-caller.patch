@@ -1,0 +1,20 @@
+diff --git a/libkern/c++/OSSymbol.cpp b/libkern/c++/OSSymbol.cpp
+index 1652cf2..530bdc3 100644
+--- a/libkern/c++/OSSymbol.cpp
++++ b/libkern/c++/OSSymbol.cpp
+@@ -423,6 +423,15 @@ OSSymbol::initWithString(const OSString *)
+ OSSharedPtr<const OSSymbol>
+ OSSymbol::withString(const OSString *aString)
+ {
++	if ((uintptr_t)aString >= 0xfffffff007000000ULL && (uintptr_t)aString < 0xfffffff008000000ULL) {
++		/* peridot: a caller handed in a code address where an OSString belongs.
++		 * Print the return address and stop here: the screen keeps this line,
++		 * and symbolize.py turns the address into the function name. */
++		printf("OSWL %p %p" "\n", __builtin_return_address(0), aString);
++		for (;;) {
++			__asm__ volatile("yield");
++		}
++	}
+ 	// This string may be a OSSymbol already, cheap check.
+ 	if (OSDynamicCast(OSSymbol, aString)) {
+ 		OSSharedPtr<const OSSymbol> aStringNew((const OSSymbol *)aString, OSRetain);

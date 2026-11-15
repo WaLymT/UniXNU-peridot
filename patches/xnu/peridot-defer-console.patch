@@ -1,6 +1,8 @@
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 433b6cd..cc2fbfc 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -519,6 +519,9 @@
+@@ -519,6 +519,9 @@ PE_init_platform(boolean_t vm_initialized, void *args)
  void
  PE_create_console(void)
  {
@@ -10,9 +12,11 @@
  	/*
  	 * Check the head of VRAM for a panic log saved on last panic.
  	 * Do this before the VRAM is trashed.
+diff --git a/pexpert/gen/pe_gen.c b/pexpert/gen/pe_gen.c
+index 5333160..d7aa881 100644
 --- a/pexpert/gen/pe_gen.c
 +++ b/pexpert/gen/pe_gen.c
-@@ -137,7 +137,7 @@
+@@ -137,7 +137,7 @@ PE_init_printf(boolean_t vm_initialized)
  	if (!vm_initialized) {
  		PE_putc = console_write_char;
  	} else {

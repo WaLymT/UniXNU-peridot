@@ -26,9 +26,13 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_NATIVE_RAM_BLOCK is not set
 
-# No SoC power or PMGR policy yet. This is the sheng-specific flag: it must not
-# be enabled for peridot.
-# CONFIG_XNU_SHENG_PMGR is not set
+# AMFI waits for an ApplePMGRNub and panics with "AMFI: No PMGR?" without one.
+# The shared sheng-platform-power patch calls sheng_pmgr_run(), and the board
+# package publishes the original provider through the guarded ABI instrument.
+CONFIG_XNU_SHENG_PMGR=y
+# Keep the prelink candidate and its record: the guarded original-ABI audits read
+# build/xnu-prelink instead of rebuilding one.
+CONFIG_XNU_KEEP_PRELINK_CANDIDATE=y
 
 CONFIG_XNU_ARMVIRT_PLATFORM=n
 
@@ -38,7 +42,7 @@ CONFIG_XNU_ARMVIRT_PLATFORM=n
 # and the kernel fails to link with three undefined mockfs symbols.
 CONFIG_XNU_SOURCE_MOCKFS=y
 
-# peridot has no storage driver, so the offline root fixture is dead weight and
-# its archive does not reach the link line in this configuration. Last line wins,
-# so this overrides the =y above.
-# CONFIG_XNU_SOURCE_MOCKFS is not set
+# 2026-11-15: mockfs is the RAM-disk root of the bring-up path (a Mach-O placed at the
+# start of the root device becomes /sbin/launchd). Last line wins in xnu_env(), so it
+# must stay =y here.
+CONFIG_XNU_SOURCE_MOCKFS=y

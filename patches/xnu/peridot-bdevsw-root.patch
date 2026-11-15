@@ -1,0 +1,61 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -50,6 +50,7 @@
+ #include <mach/machine.h>
+ #include <uuid/uuid.h>
+ #include <sys/vnode_internal.h>
++#include <sys/conf.h>
+ #include <sys/mount.h>
+ #include <corecrypto/ccsha2.h>
+ #include <kdp/sk_core.h>
+@@ -67,6 +68,33 @@
+ extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
+ extern void di_root_ramfile(IORegistryEntry * entry);
+ extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
++extern const int nblkdev;
++
++// peridot: the root may be a bdevsw disk registered directly by the platform UFS
++// driver (drivers/ShengUfs/NativeUfs.cpp). Such a device never shows up as an
++// IOMedia, so the wait below cannot succeed; when it is registered and openable,
++// IOFindBSDRoot adopts it instead of timing out.
++extern dev_t rootdev;
++extern uint64_t native_ufs_bdev_absolute;
++extern uint64_t native_ufs_bdev_bytes;
++
++static boolean_t
++peridotBdevswRootReady(void)
++{
++	int maj;
++
++	if (rootdev == NODEV) {
++		return false;
++	}
++	maj = major(rootdev);
++	if (maj < 0 || maj >= nblkdev) {
++		return false;
++	}
++	if (bdevsw[maj].d_open == NULL || bdevsw[maj].d_open == eno_opcl) {
++		return false;
++	}
++	return true;
++}
+ extern boolean_t cpuid_vmm_present(void);
+ 
+ #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
+@@ -918,6 +946,16 @@
+ 			// The disk isn't found - have the user pick from System Recovery.
+ 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
+ #elif XNU_TARGET_OS_IOS
++			if (peridotBdevswRootReady()) {
++				mjr = major(rootdev);
++				mnr = minor(rootdev);
++				*root = rootdev;
++				*oflags = flags;
++				strlcpy(rootName, "disk0", rootNameSize);
++				IOLog("peridot: adopting bdevsw root %d/%d abs=%llx bytes=%llx" "\n", mjr, mnr,
++				    native_ufs_bdev_absolute, native_ufs_bdev_bytes);
++				goto iofrootx;
++			}
+ 			panic("Failed to mount root device");
+ #endif
+ 		}

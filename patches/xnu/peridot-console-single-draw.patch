@@ -1,0 +1,102 @@
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+index 7d01472..ffcaf44 100644
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -1234,10 +1234,13 @@ gc_update_color(int color, boolean_t fore)
+ void
+ vcputc_options(char c, __unused bool poll)
+ {
+-	/* peridot: draw on the GOP frame buffer and stop; vcputc_lock has */
+-	/* no lock group until vcinit() runs.                              */
++	/* peridot: _cnputc() already drew this character; drawing it here a
++	 * second time made every glyph appear twice on screen. */
+ 	extern void peridot_fb_putc(char c);
+-	peridot_fb_putc(c);
++	extern boolean_t peridot_fb_take_draw(void);
++	if (!peridot_fb_take_draw()) {
++		peridot_fb_putc(c);
++	}
+ 	return;
+ 	if (gc_initialized && gc_enabled) {
+ 		VCPUTC_LOCK_LOCK();
+@@ -1257,7 +1260,10 @@ void
+ vcputc(char c)
+ {
+ 	extern void peridot_fb_putc(char c);
+-	peridot_fb_putc(c);
++	extern boolean_t peridot_fb_take_draw(void);
++	if (!peridot_fb_take_draw()) {
++		peridot_fb_putc(c);
++	}
+ 	return;
+ 	vcputc_options(c, false);
+ }
+diff --git a/pexpert/gen/pe_gen.c b/pexpert/gen/pe_gen.c
+index d1527a0..95e8baf 100644
+--- a/pexpert/gen/pe_gen.c
++++ b/pexpert/gen/pe_gen.c
+@@ -175,6 +175,10 @@ static uint32_t  peridot_fb_x;
+ static uint32_t  peridot_fb_y;
+ static boolean_t peridot_fb_ready;
+ 
++/* Set by every draw and consumed by the console backend: _cnputc() draws
++ * for all backends, so vcputc() must not draw the same character again. */
++static boolean_t peridot_fb_drawn;
++
+ #define PERIDOT_FB_SCALE 4
+ 
+ void
+@@ -184,6 +188,7 @@ peridot_fb_putc(char c)
+ 	uint64_t glyph;
+ 	uint32_t top, bottom;
+ 
++	peridot_fb_drawn = TRUE;
+ 	if (!peridot_fb_ready) {
+ 		if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_rowBytes == 0 ||
+ 		    PE_state.video.v_height == 0) {
+@@ -257,10 +262,43 @@ peridot_fb_putc(char c)
+ 		peridot_fb_y += 14 * PERIDOT_FB_SCALE;
+ 	}
+ scroll:
+-	if (peridot_fb_y + 14 * PERIDOT_FB_SCALE >= peridot_fb_height) {
+-		peridot_fb_y = 0;
++	/* Strictly greater: every character falls through to this label, and a
++	 * scroll leaves the cursor on the last line. With >= the next character
++	 * scrolled again and the text walked down the screen diagonally. */
++	if (peridot_fb_y + 14 * PERIDOT_FB_SCALE > peridot_fb_height) {
++		/* Scroll by one text line. This used to wrap to row zero, so a dump
++		 * taller than the screen overwrote its own first lines: the panic
++		 * header vanished while its register tail survived. */
++		uint64_t line = 14 * PERIDOT_FB_SCALE;
++		if (peridot_fb_height > line) {
++			uint64_t words = peridot_fb_rowbytes / 8;
++			uint64_t total = (peridot_fb_height - line) * words;
++			uint64_t *dst = (uint64_t *)peridot_fb;
++			uint64_t *src = (uint64_t *)(peridot_fb + line * peridot_fb_rowbytes);
++			uint32_t fy, fx;
++			uint64_t w;
++			for (w = 0; w < total; w++) {
++				dst[w] = src[w];
++			}
++			for (fy = peridot_fb_height - (uint32_t)line; fy < peridot_fb_height; fy++) {
++				uint32_t *row = (uint32_t *)(peridot_fb +
++				    (uint64_t)fy * peridot_fb_rowbytes);
++				for (fx = 0; fx < peridot_fb_width; fx++) {
++					row[fx] = 0xFF000000u;
++				}
++			}
++		}
++		peridot_fb_y = peridot_fb_height - (uint32_t)line;
+ 	}
+ }
++
++boolean_t
++peridot_fb_take_draw(void)
++{
++	boolean_t drawn = peridot_fb_drawn;
++	peridot_fb_drawn = FALSE;
++	return drawn;
++}
+ void
+ PE_init_printf(boolean_t vm_initialized)
+ {

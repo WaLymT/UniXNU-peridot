@@ -1,0 +1,25 @@
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 7536e4e..69a7659 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -170,6 +170,20 @@ check_for_panic_log(void)
+ #endif /* DEVELOPMENT && defined(XNU_TARGET_OS_BRIDGE) */
+ 
+ #endif
++	if (gPanicBase == 0) {
++		/* peridot: the ADT carries no panic region; the board names one on the command line. */
++		unsigned int base = 0, size = 0;
++		if (PE_parse_boot_argn("panic-base", &base, sizeof(base)) &&
++		    PE_parse_boot_argn("panic-size", &size, sizeof(size)) &&
++		    base != 0 && size >= sizeof(struct embedded_panic_header)) {
++			gPanicBase = ml_io_map_wcomb((vm_offset_t)base, (vm_size_t)size);
++			if (gPanicBase != 0) {
++				panic_text_len = size - sizeof(struct embedded_panic_header);
++				gPanicSize = size;
++			}
++		}
++	}
++
+ 	panic_info = (struct embedded_panic_header *)gPanicBase;
+ 
+ 	if (panic_info->eph_magic == EMBEDDED_PANIC_MAGIC) {

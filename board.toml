@@ -1,4 +1,4 @@
-# peridot (Redmi Turbo 3 / POCO F6) — UniXNU device repository, format 2.
+# peridot (Redmi Turbo 3 / POCO F6) 闂?UniXNU device repository, format 2.
 #
 # Every value below is either taken from a named source or marked TODO(verify).
 # Sources: stock DTS (dts/vendor/peridot-stock.dts), Mu-Silicium
@@ -18,7 +18,7 @@ os_profile = "ipados-17.7.11-21H461"
 # XnuPrelink are required to boot. Storage, display and input components are
 # added once their board recipes exist; see the porting record for the order.
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "ShengUfs"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "ShengUfs", "Adreno735"]
 
 [kernel]
 defconfig = "peridot_defconfig"
@@ -41,6 +41,9 @@ archives = [
   "component:VirtioMmioBlock",
   "component:ShengUfs",
   "build-ufs-bindings.py",
+  "component:Adreno735",
+  "build-adreno735-kits.py",
+  "build-sheng-platform-power.py",
 ]
 
 # [kernel.prelink] is inherited from the OS profile: the iPadOS 17.7.11
@@ -94,7 +97,18 @@ dram_size = "0x80000000"
 
 # power state and then only reads the controller, the SMMU and the request
 # lists, printing what firmware left behind. Nothing is written with this set.
-kernel_args = ["-v", "native-ufs-probe=12"]
+# native-ufs-storage selects the storage bring-up stages (bit mask, see NativeUfs.cpp):
+# 1 load IOStorageFamily, 2 add IOBlockStorageDriver, 4 add IOGUIDPartitionScheme,
+# 8 add the APFS container personalities.
+# Bring-up publication in the mode the muyu port uses: no owner policy, publish the
+# windows and let the publisher accept any media below them.
+# native-ufs-mountroot=1: run the real vfs_mountroot() on the bdevsw window once the
+# block-device ioctls answer (see NativeUfs.cpp). Off in every other profile so a
+# refused open cannot panic a bring-up boot.
+# Route 3 (2026-11-15): the root is a RAM disk instead of the APFS container.
+# rd=md0 makes bsd_init root on the Data ramdisk; mockfs turns the Mach-O at its start
+# into /sbin/launchd. The UFS driver stays off so it cannot steal rootdev.
+kernel_args = ["-v", "rd=md0", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
@@ -106,11 +120,23 @@ owned_memory_size = "0x100000000"
 # CPU MPIDR values read from the stock DTS: eight cores at 0x000..0x700.
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
-packed_data_ramdisk = true
+packed_data_ramdisk = false
 # TODO(verify): a property of the iPadOS 17.7.11 Data image, copied from the
 # sheng board. Re-derive it from the selected IPSW before the payload step.
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 unique_chip_id = "required"
+
+# Persistent panic log: pexpert check_for_panic_log() maps /pram and keeps the last panic
+# text in the /chosen window. The address is the stock ramoops carve-out, which is reserved
+# DRAM and survives a warm reset (TODO(verify): confirm nothing else writes 0xa7000000).
+[adt]
+
+[adt.pram]
+address = "0xa7000000"
+size = "0x400000"
+
+[adt.chosen.u32]
+embedded-panic-log-size = "0x40000"
 
 [userdata]
 # TODO(REQUIRED): both values come from the GPT entry named "userdata" on this

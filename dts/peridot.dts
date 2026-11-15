@@ -18,6 +18,19 @@
         reg = <0 0x80000000 0 0x80000000>;
     };
 
+    // Persistent panic log (pexpert check_for_panic_log): XNU maps /pram and keeps the
+    // last panic text in /chosen's embedded-panic-log-size window. patched
+    // peridot-last-panic-print.patch prints it on the next boot. The address is the
+    // stock ramoops carve-out, which is reserved DRAM and survives a warm reset.
+    pram {
+        compatible = "pram";
+        reg = <0 0xa7000000 0 0x400000>;
+    };
+
+    chosen {
+        embedded-panic-log-size = <0x40000>;
+    };
+
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
@@ -46,3 +59,9 @@
 &ufs { status = "okay"; };
 &ufsphy { status = "okay"; };
 &apps_smmu { status = "okay"; };
+
+// GPU bring-up: the platform publishes an IOPlatformDevice for each of these, and
+// NativeAdreno735 claims only the node at 0x3d00000. Enabled so the ADT carries them.
+&gpu { status = "okay"; };
+&gmu { status = "okay"; };
+&gpu_smmu { status = "okay"; };

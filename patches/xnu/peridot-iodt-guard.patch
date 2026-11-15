@@ -1,6 +1,8 @@
+diff --git a/iokit/Kernel/IODeviceTreeSupport.cpp b/iokit/Kernel/IODeviceTreeSupport.cpp
+index ee5edb3..f704fae 100644
 --- a/iokit/Kernel/IODeviceTreeSupport.cpp
 +++ b/iokit/Kernel/IODeviceTreeSupport.cpp
-@@ -570,6 +570,10 @@
+@@ -570,6 +570,10 @@ IODTFindInterruptParent( IORegistryEntry * regEntry, IOItemCount index )
  		}
  		phandle = ((UInt32 *) data->getBytesNoCopy())[index];
  		parent = FindPHandle( phandle );
@@ -11,7 +13,7 @@
  	} else if (NULL == regEntry->getProperty( "interrupt-controller")) {
  		parent = regEntry->getParentEntry( gIODTPlane);
  	} else {
-@@ -630,6 +634,9 @@
+@@ -630,6 +634,9 @@ IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec, UInt32 index,
  	bool                        cmp, ok = false;
  
  	parent = IODTFindInterruptParent( regEntry, index );
