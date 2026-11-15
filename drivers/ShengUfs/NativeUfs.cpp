@@ -2963,13 +2963,25 @@ static void nativeBdevStrategy (struct buf *bp)
   const bool writing = (buf_flags (bp) & B_READ) == 0;
   int error = 0;
 
+  // The page cache hands a strategy routine a B_PAGEIO buffer whose data area is a UPL, not a
+  // kernel pointer: buf_dataptr() is NULL for those (p367: "invalid bounce=1 data=0"). Map the
+  // buffer first, exactly like the memory-device driver (bsd/dev/memdev.c mdevstrategy).
+  caddr_t vaddr = nullptr;
+  if (buf_map (bp, &vaddr) != 0 || vaddr == nullptr) {
+    buf_seterror (bp, EIO);
+    buf_setresid (bp, count);
+    __atomic_fetch_add (&native_ufs_block_failures, 1, __ATOMIC_RELAXED);
+    buf_biodone (bp);
+    return;
+  }
+
   if (writing) {
     // The UFS window is writable (hostMediaOpen in the probe), so serve writes through the same
     // window writer the IOBlockStorageDevice path uses: WRITE(10) with FUA, read-modify-write
     // for non-4096-byte requests. Without this a bdevsw root (fix A) can only read, and APFS
     // cannot replay its journal or update the container it mounted read-write.
     struct WriteOperations {
-      struct buf *buffer;
+      caddr_t data;
       void lock () { if (gBdevLock) IOLockLock (gBdevLock); }
       void unlock () { if (gBdevLock) IOLockUnlock (gBdevLock); }
       IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
@@ -2979,17 +2991,18 @@ static void nativeBdevStrategy (struct buf *bp)
         return hostWrite4k (0, lba, blocks, in, true);
       }
       uint64_t gather (uint64_t offset, void *dst, uint64_t length) {
-        memcpy (dst, reinterpret_cast<const uint8_t *> (buf_dataptr (buffer)) + offset, length);
+        memcpy (dst, reinterpret_cast<const uint8_t *> (data) + offset, length);
         return length;
       }
-    } writeOperations = { bp };
+    } writeOperations = { vaddr };
     UfsWindowResult outcome = ufsWriteWindow (writeOperations, gBdevAbsolute, gBdevBytes, block, count, gBdevBounce);
     if (outcome.status != kIOReturnSuccess) error = EIO;
   } else {
     if (gBdevLock) IOLockLock (gBdevLock);
-    error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (buf_dataptr (bp)));
+    error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (vaddr));
     if (gBdevLock) IOLockUnlock (gBdevLock);
   }
+  buf_unmap (bp);
 
   if (error) {
     __atomic_fetch_add (&gBdevFailures, 1, __ATOMIC_RELAXED);
