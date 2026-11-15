@@ -276,6 +276,21 @@ static bool hostMediaOpen (uint64_t first, uint64_t blocks)
   return true;
 }
 
+// The install target window: a second, disjoint range of userdata (probe 37) that the install
+// flow will format/restore into. Same discipline as the media window: writes may only leave the
+// host inside an opened range.
+static bool gTargetOpen = false;
+static uint64_t gTargetFirst = 0, gTargetBlocks = 0;
+static bool hostTargetOpen (uint64_t first, uint64_t blocks)
+{
+  if (!blocks || first > 0xffffffffULL || blocks > 0xffffffffULL - first) return false;
+  if (gMediaOpen && first < gMediaFirst + gMediaBlocks && gMediaFirst < first + blocks) return false;
+  gTargetFirst = first;
+  gTargetBlocks = blocks;
+  gTargetOpen = true;
+  return true;
+}
+
 static bool hostLogOpen (uint64_t first, uint64_t blocks)
 {
   if (gLogOpen || !blocks || first > 0xffffffffULL || blocks > 0xffffffffULL - first) return false;
@@ -290,6 +305,7 @@ static bool hostInWindow (uint64_t lba, uint32_t blocks)
 {
   if (gStoreOpen && lba >= gStoreFirst && lba - gStoreFirst < gStoreBlocks && blocks <= gStoreBlocks - (lba - gStoreFirst)) return true;
   if (gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks && blocks <= gLogBlocks - (lba - gLogFirst)) return true;
+  if (gTargetOpen && lba >= gTargetFirst && lba - gTargetFirst < gTargetBlocks && blocks <= gTargetBlocks - (lba - gTargetFirst)) return true;
   return gMediaOpen && lba >= gMediaFirst && lba - gMediaFirst < gMediaBlocks && blocks <= gMediaBlocks - (lba - gMediaFirst);
 }
 
@@ -345,10 +361,11 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
 // SYNCHRONIZE CACHE(10) for the whole LUN: everything written so far is on the medium when this returns.
 static IOReturn hostSyncCache (void)
 {
-  // The media window is a write path too (probe 18 publishes it to the storage stack). Leaving it
-  // out of this gate made every IOBlockStorageDevice write fail with kIOReturnNotReady after the
-  // data had already reached the device (audit 2026-11-15, P0-1).
-  if (!gHost.ready || (!gStoreOpen && !gLogOpen && !gMediaOpen)) return kIOReturnNotReady;
+  // The media and install-target windows are write paths too (probe 18/37 publish them to the
+  // storage stack). Leaving the media window out of this gate made every IOBlockStorageDevice
+  // write fail with kIOReturnNotReady after the data had already reached the device (audit
+  // 2026-11-15, P0-1).
+  if (!gHost.ready || (!gStoreOpen && !gLogOpen && !gMediaOpen && !gTargetOpen)) return kIOReturnNotReady;
   const bool held = hostLock ();
   uint8_t cdb[10] = { 0x35 };
   uint32_t scsi = 0;

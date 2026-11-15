@@ -19,6 +19,9 @@
 // contract spec_open() checks before it lets a bdevsw vnode open.
 #include <sys/disk.h>
 #include <sys/buf.h>
+#include <sys/mount.h>
+#include <mach/mach_time.h>
+#include <kern/clock.h>
 #include <sys/proc.h>
 #include <miscfs/devfs/devfs.h>
 #ifndef DEVFS_BLOCK
@@ -3133,6 +3136,12 @@ static NativeUfsBlock *gApfsMediaDevice = nullptr;
 // (the block-device block numbers are relative to the window, the kernel transport wants
 // absolute LBAs).
 static uint64_t gApfsMediaFirstLba = 0;
+// The install target (probe 37): a second, large userdata window published as its own
+// IOBlockStorageDevice, used to prove writes/throughput before asr/newfs_apfs drive it.
+static NativeUfsBlock *gInstallTargetDevice = nullptr;
+static uint64_t gInstallTargetFirstLba = 0, gInstallTargetBytes = 0;
+// Probe 38: copy the 184 MiB APFS container from the start of userdata to the install target.
+static uint64_t gInstallCopySourceLba = 0, gInstallCopyTargetLba = 0;
 
 static void apfsMediaReportThread (void *argument, wait_result_t)
 {
@@ -3219,11 +3228,9 @@ static void trustQueryThread (void *, wait_result_t)
 // Root filesystem report (native-ufs-probe=32): the boot screen cannot tell mockfs from apfs,
 // so this asks the exported vfs helpers which filesystem actually owns the root vnode.
 extern "C" {
-struct vnode;
-struct mount;
+// <sys/mount.h> provides vfs_name()/vfs_statfs(); vnode_mount is kernel-internal.
 extern struct vnode *rootvnode;
 extern struct mount *vnode_mount (struct vnode *);
-extern int vfs_name (struct mount *, char *, size_t);
 }
 static void rootFsReportThread (void *, wait_result_t)
 {
@@ -3231,7 +3238,7 @@ static void rootFsReportThread (void *, wait_result_t)
   char fsname[64] = "?";
   struct vnode *rv = rootvnode;
   struct mount *mp = rv ? vnode_mount (rv) : nullptr;
-  if (mp) vfs_name (mp, fsname, sizeof (fsname));
+  if (mp) vfs_name (mp, fsname);
   panic ("NATIVE_UFS rootfs fs=%s rootvnode=%p mount=%p", fsname,
          reinterpret_cast<void *> (rv), reinterpret_cast<void *> (mp));
 }
@@ -3294,6 +3301,133 @@ static void deviceWriteTestThread (void *, wait_result_t)
          static_cast<int> (block), static_cast<int> (readRc), static_cast<int> (writeRc),
          static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
          (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+}
+
+// ---- Install target window + write throughput + root flags (native-ufs-probe=37) -------
+// The next stage of the goal: a large, dedicated target the install tools can format and
+// restore into. This probe registers a second UFS window (1 GiB into userdata, up to 8 GiB),
+// publishes it as an IOBlockStorageDevice, writes/reads/restores a page and 4 MiB through
+// that device entry, and reports the root mount flags so we know whether the UFS root is
+// writable by userland yet. Everything is reported in one panic line (32-bit specifiers).
+static void installTargetTestThread (void *, wait_result_t)
+{
+  IOSleep (15000);                                  // root mounted + launchd started
+  uint32_t rootFlags = 0xdeadbeefU;
+  struct vnode *rv = rootvnode;
+  struct mount *mp = rv ? vnode_mount (rv) : nullptr;
+  if (mp) {
+    struct vfsstatfs *sf = vfs_statfs (mp);
+    if (sf) rootFlags = static_cast<uint32_t> (sf->f_flags);
+  }
+  NativeUfsBlock *device = gInstallTargetDevice;
+  if (!device || !gInstallTargetBytes) panic ("NATIVE_UFS install: no target device");
+  const uint32_t page = 4096;
+  uint8_t *original = static_cast<uint8_t *> (IOMalloc (page));
+  uint8_t *work = static_cast<uint8_t *> (IOMalloc (page));
+  uint8_t *readback = static_cast<uint8_t *> (IOMalloc (page));
+  if (!original || !work || !readback) panic ("NATIVE_UFS install: no page buffers");
+  IOReturn pageRead = hostRead4k (0, gInstallTargetFirstLba, 1, original);
+  memcpy (work, original, page);
+  for (uint32_t i = 0; i < page; i += 64) work[i] = static_cast<uint8_t> (work[i] ^ 0x5a);
+  IOReturn pageWrite = deviceWriteBlock (device, 0, page, work);
+  memset (readback, 0, page);
+  IOReturn pageBack = hostRead4k (0, gInstallTargetFirstLba, 1, readback);
+  int pageMatch = pageBack == kIOReturnSuccess && !memcmp (readback, work, page);
+  IOReturn pageRestore = deviceWriteBlock (device, 0, page, original);
+  memset (readback, 0, page);
+  IOReturn pageVerify = hostRead4k (0, gInstallTargetFirstLba, 1, readback);
+  int pageRestored = pageVerify == kIOReturnSuccess && !memcmp (readback, original, page);
+  const uint32_t bulk = 4U << 20;
+  const uint32_t chunk = 128U << 10;
+  uint8_t *bulkOriginal = static_cast<uint8_t *> (IOMalloc (bulk));
+  uint8_t *bulkWork = static_cast<uint8_t *> (IOMalloc (bulk));
+  uint8_t *bulkBack = static_cast<uint8_t *> (IOMalloc (chunk));
+  if (!bulkOriginal || !bulkWork || !bulkBack) panic ("NATIVE_UFS install: no bulk buffers");
+  int bulkReadOk = 1;
+  for (uint32_t off = 0; off < bulk; off += chunk) {
+    if (hostRead4k (0, gInstallTargetFirstLba + off / 4096, chunk / 4096, bulkOriginal + off) != kIOReturnSuccess) {
+      bulkReadOk = 0;
+      break;
+    }
+  }
+  memcpy (bulkWork, bulkOriginal, bulk);
+  for (uint32_t i = 0; i < bulk; i += 64) bulkWork[i] = static_cast<uint8_t> (bulkWork[i] ^ 0xa5);
+  uint64_t t0 = mach_absolute_time ();
+  IOReturn bulkWrite = bulkReadOk ? deviceWriteBlock (device, 0, bulk, bulkWork) : kIOReturnError;
+  uint64_t t1 = mach_absolute_time ();
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds (t1 - t0, &ns);
+  uint32_t bulkMs = static_cast<uint32_t> (ns / 1000000ULL);
+  int bulkMatch = 0, bulkRestored = 0;
+  IOReturn bulkRestore = kIOReturnError;
+  if (bulkReadOk) {
+    bulkMatch = 1;
+    for (uint32_t off = 0; off < bulk; off += chunk) {
+      if (hostRead4k (0, gInstallTargetFirstLba + off / 4096, chunk / 4096, bulkBack) != kIOReturnSuccess ||
+          memcmp (bulkBack, bulkWork + off, chunk)) {
+        bulkMatch = 0;
+        break;
+      }
+    }
+    bulkRestore = deviceWriteBlock (device, 0, bulk, bulkOriginal);
+    if (bulkRestore == kIOReturnSuccess) {
+      bulkRestored = 1;
+      for (uint32_t off = 0; off < bulk; off += chunk) {
+        if (hostRead4k (0, gInstallTargetFirstLba + off / 4096, chunk / 4096, bulkBack) != kIOReturnSuccess ||
+            memcmp (bulkBack, bulkOriginal + off, chunk)) {
+          bulkRestored = 0;
+          break;
+        }
+      }
+    }
+  }
+  panic ("NATIVE_UFS install mib=%d lba=%d page=%d/%d/%d/%d rootflags=%x bulkread=%d bulkwrite=%d bulkms=%d bulkmatch=%d bulkrestore=%d ok=%d",
+         static_cast<int> (gInstallTargetBytes >> 20), static_cast<int> (gInstallTargetFirstLba),
+         static_cast<int> (pageRead), static_cast<int> (pageWrite), static_cast<int> (pageBack),
+         static_cast<int> (pageRestore), rootFlags, bulkReadOk, static_cast<int> (bulkWrite),
+         static_cast<int> (bulkMs), bulkMatch, bulkRestored,
+         (pageRead == 0 && pageWrite == 0 && pageMatch && pageRestored && bulkReadOk &&
+          bulkWrite == 0 && bulkMs > 0 && bulkMatch && bulkRestored) ? 1 : 0);
+}
+
+// ---- Install target copy (native-ufs-probe=38) ---------------------------------------
+// Copy the whole 184 MiB RestoreRamDisk APFS container from the start of userdata to the
+// install-target window (1 GiB into userdata), verify every 128 KiB chunk and report the
+// elapsed time. Probe 39 then boots from that target window.
+static void installCopyThread (void *, wait_result_t)
+{
+  IOSleep (12000);
+  uint8_t *source = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  uint8_t *target = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  if (!source || !target) panic ("NATIVE_UFS install copy: no buffers");
+  const uint64_t chunkBlocks = kDataMax / 4096;
+  const uint64_t chunks = kApfsMdBytes / kDataMax;
+  unsigned copyErrors = 0, verifyErrors = 0;
+  uint64_t t0 = mach_absolute_time ();
+  for (uint64_t i = 0; i < chunks; i++) {
+    const uint64_t off = i * chunkBlocks;
+    if (hostRead4k (0, gInstallCopySourceLba + off, static_cast<uint32_t> (chunkBlocks), source) != kIOReturnSuccess ||
+        hostWrite4k (0, gInstallCopyTargetLba + off, static_cast<uint32_t> (chunkBlocks), source, true) != kIOReturnSuccess) {
+      copyErrors++;
+      break;
+    }
+  }
+  uint64_t t1 = mach_absolute_time ();
+  for (uint64_t i = 0; i < chunks; i++) {
+    const uint64_t off = i * chunkBlocks;
+    if (hostRead4k (0, gInstallCopySourceLba + off, static_cast<uint32_t> (chunkBlocks), source) != kIOReturnSuccess ||
+        hostRead4k (0, gInstallCopyTargetLba + off, static_cast<uint32_t> (chunkBlocks), target) != kIOReturnSuccess ||
+        memcmp (source, target, kDataMax)) {
+      verifyErrors++;
+      break;
+    }
+  }
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds (t1 - t0, &ns);
+  panic ("NATIVE_UFS install copy mib=%d chunks=%d copyerr=%d verifyerr=%d ms=%d ok=%d",
+         static_cast<int> (kApfsMdBytes >> 20), static_cast<int> (chunks), static_cast<int> (copyErrors),
+         static_cast<int> (verifyErrors), static_cast<int> (ns / 1000000ULL),
+         (copyErrors == 0 && verifyErrors == 0) ? 1 : 0);
 }
 
 static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
@@ -3717,6 +3851,94 @@ bool NativeUfs::start (IOService *provider)
            static_cast<unsigned long long> (lba), mediaOpened ? 1 : 0, static_cast<int> (readRc), static_cast<int> (writeRc),
            static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
            (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+  }
+  if (probe == 39) {
+    // Boot from the installed target: the bdevsw disk is the install-target window (written by
+    // probe 38), claimed as root. The rd=md1 boot arg only makes APFS take its ramdisk restore
+    // branch; the container is mounted from the target window on UFS.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS target-root: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS target-root: no userdata partition");
+    const uint64_t kOffsetBlocks = (1ULL << 30) / 4096;
+    if (blocks <= kOffsetBlocks + 4096) panic ("NATIVE_UFS target-root: userdata too small");
+    uint64_t targetFirst = first + kOffsetBlocks;
+    if (!hostTargetOpen (targetFirst, kApfsMdBytes / 4096)) panic ("NATIVE_UFS target-root: cannot open the target window");
+    gBdevAbsolute = targetFirst * 4096ULL;
+    gBdevBytes = kApfsMdBytes;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS target-root: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    IOLog ("NATIVE_UFS target-root: lba=%llx dev=%d claim=1\n",
+           static_cast<unsigned long long> (targetFirst), static_cast<int> (rootdev));
+    return true;
+  }
+  if (probe == 38) {
+    // Copy the 184 MiB APFS container from userdata offset 0 to the install-target window.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS install copy: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS install copy: no userdata partition");
+    const uint64_t kOffsetBlocks = (1ULL << 30) / 4096;
+    if (blocks <= kOffsetBlocks + (kApfsMdBytes / 4096) + 16) panic ("NATIVE_UFS install copy: userdata too small");
+    uint64_t targetFirst = first + kOffsetBlocks;
+    if (!hostTargetOpen (targetFirst, kApfsMdBytes / 4096)) panic ("NATIVE_UFS install copy: cannot open the target window");
+    gInstallCopySourceLba = first;
+    gInstallCopyTargetLba = targetFirst;
+    IOLog ("NATIVE_UFS install copy: src=%llx dst=%llx bytes=%llx\n",
+           static_cast<unsigned long long> (first), static_cast<unsigned long long> (targetFirst),
+           static_cast<unsigned long long> (kApfsMdBytes));
+    thread_t thread = nullptr;
+    if (kernel_thread_start (installCopyThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS install copy: cannot start the copy thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  if (probe == 37) {
+    // Probe 36's UFS root plus the install target window: publish a second, large userdata
+    // window as its own IOBlockStorageDevice (1 GiB into userdata, up to 8 GiB), then test page
+    // and 4 MiB writes through that device and report the root mount flags.
+    if (!startApfsMediaRoot (this, false, false, false)) return false;
+    if (gBdevSlot < 0) panic ("NATIVE_UFS install: no bdevsw slot");
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS install: no userdata partition");
+    if (!hostMediaOpen (first, kApfsMdBytes / 4096)) panic ("NATIVE_UFS install: cannot open the media window");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    const uint64_t kOffsetBlocks = (1ULL << 30) / 4096;          // 1 GiB into userdata
+    const uint64_t kMaxTargetBlocks = (8ULL << 30) / 4096;       // 8 GiB target
+    if (blocks <= kOffsetBlocks + 4096) panic ("NATIVE_UFS install: userdata too small");
+    uint64_t targetFirst = first + kOffsetBlocks;
+    uint64_t targetBlocks = blocks - kOffsetBlocks - 16;
+    if (targetBlocks > kMaxTargetBlocks) targetBlocks = kMaxTargetBlocks;
+    if (!hostTargetOpen (targetFirst, targetBlocks)) panic ("NATIVE_UFS install: cannot open the target window");
+    gInstallTargetFirstLba = targetFirst;
+    gInstallTargetBytes = targetBlocks * 4096ULL;
+    NativeUfsBlock *target = OSTypeAlloc (NativeUfsBlock);
+    if (!target || !target->init (static_cast<OSDictionary *> (nullptr))) panic ("NATIVE_UFS install: target allocation failed");
+    OSString *generic = OSString::withCString ("Generic");
+    if (generic) {
+      target->setProperty ("device-type", generic);
+      generic->release ();
+    }
+    if (!target->configure ("InstallTarget", targetFirst * 4096ULL, gInstallTargetBytes)) panic ("NATIVE_UFS install: target configure failed");
+    if (!target->attach (this)) panic ("NATIVE_UFS install: target attach failed");
+    gInstallTargetDevice = target;
+    if (!target->start (this)) panic ("NATIVE_UFS install: target start failed");
+    IOLog ("NATIVE_UFS install: target lba=%llx mib=%llu\n",
+           static_cast<unsigned long long> (targetFirst),
+           static_cast<unsigned long long> (gInstallTargetBytes >> 20));
+    thread_t thread = nullptr;
+    if (kernel_thread_start (installTargetTestThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS install: cannot start the test thread");
+    }
+    thread_deallocate (thread);
+    return true;
   }
   if (probe == 36) {
     // Fix A from peridot/audit/2026-11-15-enotblk.md section 7: root the APFS container from
