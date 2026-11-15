@@ -1,0 +1,46 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1221,6 +1221,22 @@
+ unsigned int peridot_vfs_names[8];
+ int peridot_vfs_count;
+ 
++
++/* peridot: the prelinked apfs registers its vfs from its kext start, which the prelink runs
++ * before bsd_init's vfsinit(); that entry is gone by mountroot time (re-running the
++ * component's install_apfs_vfs_fs() panics on a duplicate sysctl slot). Register the same
++ * file system here with the exact vfs_fsentry it builds: vfsops, six vnodeopv descriptors,
++ * name and flags. The addresses are fixed by the pinned kernelcache, root list and slide. */
++static struct vfs_fsentry peridot_apfs_vfse = {
++	.vfe_vfsops = (struct vfsops *)(uintptr_t)0xfffffff005f2b3c8UL,
++	.vfe_vopcnt = 6,
++	.vfe_opvdescs = (struct vnodeopv_desc **)(uintptr_t)0xfffffff006b2d478UL,
++	.vfe_fstypenum = 0,
++	.vfe_fsname = "apfs",
++	.vfe_flags = 0x16479,
++	.vfe_reserv = { NULL, NULL },
++};
++static vfstable_t peridot_apfs_handle;
+ static int peridot_apfs_vfsmount = -1;
+ 
+ static boolean_t
+@@ -1272,6 +1288,20 @@
+ 		return error;
+ 	}
+ 	printf ("peridot-mountroot: rootdev=%d major=%d minor=%d blk=%d\n", (int)rootdev, major(rootdev), minor(rootdev), (int)(rootvp->v_type == VBLK));
++	peridot_vfs_names[7] = (unsigned int)vfs_fsadd(&peridot_apfs_vfse, &peridot_apfs_handle);
++	if (peridot_apfs_handle != NULL && peridot_apfs_handle != vfsconf) {
++		struct vfstable *tail = vfsconf;
++		/* vfs_fsadd appends at the tail behind mockfs; mockfs would mount the raw
++		 * root device first and the loop would return before apfs is reached. */
++		while (tail->vfc_next != NULL && tail->vfc_next != peridot_apfs_handle) {
++			tail = tail->vfc_next;
++		}
++		if (tail->vfc_next == peridot_apfs_handle) {
++			tail->vfc_next = peridot_apfs_handle->vfc_next;
++		}
++		peridot_apfs_handle->vfc_next = vfsconf->vfc_next;
++		vfsconf->vfc_next = peridot_apfs_handle;
++	}
+ 	/*
+ 	 * 4951998 - code we call in vfc_mountroot may replace rootvp
+ 	 * so keep a local copy for some house keeping.

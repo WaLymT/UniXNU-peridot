@@ -4,6 +4,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/crypto/sha2.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -1671,36 +1672,41 @@ public:
   bool configure (const char *name, uint64_t absoluteOffset, uint64_t size);
   bool start (IOService *provider) override;
   bool handleOpen (IOService *client, IOOptionBits options, void *argument) override;
+  void handleClose (IOService *client, IOOptionBits options) override;
   void free () override;
   IOReturn doEjectMedia () override { return kIOReturnUnsupported; }
-  IOReturn doFormatMedia (UInt64) override { return kIOReturnNotWritable; }
+  IOReturn doFormatMedia (UInt64) override { return kIOReturnSuccess; }
   UInt32 doGetFormatCapacities (UInt64 *, UInt32) const override { return 0; }
-  char *getVendorString () override { gDeviceCalls[4] = gDeviceCalls[4] + 1; return const_cast<char *> ("Native"); }
-  char *getProductString () override { return label; }
-  char *getRevisionString () override { return const_cast<char *> ("1.0"); }
-  char *getAdditionalDeviceInfoString () override { return const_cast<char *> ("UFS LUN 0 userdata window, read-only"); }
+  char *getVendorString () override { gDeviceCalls[4] = gDeviceCalls[4] + 1; IOLog ("NUV vendor\n"); return const_cast<char *> ("Native"); }
+  char *getProductString () override { IOLog ("NUV product %s\n", label); return label; }
+  char *getRevisionString () override { IOLog ("NUV revision\n"); return const_cast<char *> ("1.0"); }
+  char *getAdditionalDeviceInfoString () override { IOLog ("NUV info\n"); return const_cast<char *> ("UFS LUN 0 userdata window, read-write"); }
   IOReturn reportBlockSize (UInt64 *value) override {
     gDeviceCalls[0] = gDeviceCalls[0] + 1;
+    IOLog ("NUV blocksize\n");
     *value = 512;
     return kIOReturnSuccess;
   }
-  IOReturn reportEjectability (bool *value) override { *value = false; return kIOReturnSuccess; }
+  IOReturn reportEjectability (bool *value) override { IOLog ("NUV ejectability\n"); *value = false; return kIOReturnSuccess; }
   IOReturn reportMaxValidBlock (UInt64 *value) override {
     gDeviceCalls[1] = gDeviceCalls[1] + 1;
+    IOLog ("NUV maxblock\n");
     *value = bytes / 512 - 1;
     return kIOReturnSuccess;
   }
   IOReturn reportMediaState (bool *present, bool *changed) override {
     gDeviceCalls[2] = gDeviceCalls[2] + 1;
+    IOLog ("NUV mediastate\n");
     *present = online; if (changed) *changed = false; return kIOReturnSuccess;
   }
-  IOReturn reportRemovability (bool *value) override { *value = false; return kIOReturnSuccess; }
+  IOReturn reportRemovability (bool *value) override { IOLog ("NUV removability\n"); *value = false; return kIOReturnSuccess; }
   IOReturn reportWriteProtection (bool *value) override {
     gDeviceCalls[3] = gDeviceCalls[3] + 1;
-    *value = true;
+    IOLog ("NUV writeprotect\n");
+    *value = false;
     return kIOReturnSuccess;
   }
-  IOReturn doSynchronizeCache () override { return online ? kIOReturnSuccess : kIOReturnNotReady; }
+  IOReturn doSynchronizeCache () override { IOLog ("NUV sync\n"); return online ? kIOReturnSuccess : kIOReturnNotReady; }
   IOReturn doSynchronize (UInt64, UInt64, IOOptionBits) override { return doSynchronizeCache (); }
   IOReturn getWriteCacheState (bool *value) override { *value = false; return kIOReturnSuccess; }
   IOReturn setWriteCacheState (bool) override { return kIOReturnUnsupported; }
@@ -2017,8 +2023,19 @@ bool NativeUfsBlock::start (IOService *provider)
 // personality matched and IOBlockStorageDriver::start() ran.
 bool NativeUfsBlock::handleOpen (IOService *client, IOOptionBits options, void *argument)
 {
-  IOLog ("NU8 open %s\n", client ? client->getName () : "-");
-  return IOBlockStorageDevice::handleOpen (client, options, argument);
+  // The prelinked IOStorageFamily dispatches this hook through the class vtable; delegating
+  // to the parent implementation is not bound on this port, so return success directly and
+  // log both the caller and the decision (the driver's whole start path depends on it).
+  IOLog ("NU8 open %s cls=%s ret=1\n", client ? client->getName () : "-", (client && client->getMetaClass () && client->getMetaClass ()->getClassName ()) ? client->getMetaClass ()->getClassName () : "-");
+  return true;
+}
+
+// A close right after the open means the storage family gave up on the device, which is the
+// difference between 'driver still starting' and 'driver failed' on the boot screen.
+void NativeUfsBlock::handleClose (IOService *client, IOOptionBits options)
+{
+  IOLog ("NU8 close %s\n", client ? client->getName () : "-");
+  (void) options;
 }
 
 IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
@@ -2029,8 +2046,36 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
       count > bytes / 512 - block || buffer->getLength () < count * 512) {
     return kIOReturnBadArgument;
   }
-  if (buffer->getDirection () != kIODirectionIn) {
-    return kIOReturnNotWritable;
+  const IODirection direction = buffer->getDirection ();
+  if (!(direction & (kIODirectionIn | kIODirectionOut))) {
+    return kIOReturnBadArgument;
+  }
+  if (direction & kIODirectionOut) {
+    struct WriteOperations {
+      IOLock *mutex;
+      IOMemoryDescriptor *buffer;
+      void lock () { IOLockLock (mutex); }
+      void unlock () { IOLockUnlock (mutex); }
+      IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
+        return hostRead4k (0, lba, blocks, out);
+      }
+      IOReturn write (uint64_t lba, uint32_t blocks, const void *in) {
+        IOReturn r = hostWrite4k (0, lba, blocks, in);
+        if (r == kIOReturnSuccess) r = hostSyncCache ();
+        return r;
+      }
+      uint64_t gather (uint64_t offset, void *dst, uint64_t length) {
+        return buffer->readBytes (offset, dst, length);
+      }
+    } writeOperations = { windowLock, buffer };
+    UfsWindowResult writeOutcome = ufsWriteWindow (writeOperations, absolute, bytes, block, count, bounce);
+    if (writeOutcome.status != kIOReturnSuccess) {
+      __atomic_fetch_add (&native_ufs_block_failures, 1, __ATOMIC_RELAXED);
+      gRootDiagnostic.result = static_cast<uint32_t> (writeOutcome.status);
+      rootDiagnosticFailure ("root window write failed");
+    }
+    completion->action (completion->target, completion->parameter, writeOutcome.status, writeOutcome.done);
+    return kIOReturnSuccess;
   }
   if (!online) {
     return kIOReturnNotReady;
@@ -2748,6 +2793,33 @@ static void publicationReportThread (void *, wait_result_t)
          gStorageStage, gStorageLevel, gRootMediaText);
 }
 
+// IOKit class/catalogue state (native-ufs-probe=19): no hardware work. Reports which of the
+// storage classes are registered and whether any instance/media exists, which decides whether
+// publishing a device can produce an IOMedia for the APFS container scheme to match.
+static void iokitStateThread (void *argument, wait_result_t)
+{
+  unsigned delay = static_cast<unsigned> (reinterpret_cast<uintptr_t> (argument));
+  IOSleep (delay * 1000);
+  unsigned regDriver = 0, regMedia = 0, regGuid = 0, regScheme = 0, regContainer = 0, regDevice = 0;
+  unsigned instDriver = classInstances ("IOBlockStorageDriver", &regDriver);
+  unsigned instMedia = classInstances ("IOMedia", &regMedia);
+  unsigned instGuid = classInstances ("IOGUIDPartitionScheme", &regGuid);
+  unsigned instScheme = classInstances ("AppleAPFSContainerScheme", &regScheme);
+  unsigned instContainer = classInstances ("AppleAPFSContainer", &regContainer);
+  unsigned instDevice = classInstances ("IOBlockStorageDevice", &regDevice);
+  unsigned storageFlags = kextFlags ("com.apple.iokit.IOStorageFamily");
+  unsigned apfsFlags = kextFlags ("com.apple.filesystems.apfs");
+  unsigned mediaCount = countService ("IOMedia");
+  unsigned driverCount = countService ("IOBlockStorageDriver");
+  panic ("NATIVE_UFS iokit state\n"
+         "storage=%x apfs=%x cat=%u media=%u driver=%u\n"
+         "regDrv=%u/%u regMedia=%u/%u regGuid=%u/%u\n"
+         "regScheme=%u/%u regContainer=%u/%u regDevice=%u/%u",
+         storageFlags, apfsFlags, gIOCatalogue ? 1u : 0u, mediaCount, driverCount,
+         regDriver, instDriver, regMedia, instMedia, regGuid, instGuid,
+         regScheme, instScheme, regContainer, instContainer, regDevice, instDevice);
+}
+
 // Storage discovery report (native-ufs-probe=12): a separate thread waits for the original
 // IOStorageFamily to publish IOMedia for the root windows, then shows what exists on the screen.
 // It must not run inside the matching thread that is starting NativeUfs.
@@ -2896,6 +2968,315 @@ static void publishNativeBdev ()
   if (mountroot == 1) {
     if (kernel_thread_start (mountRootThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate (thread);
   }
+}
+
+// ---- APFS root from memory over the userdata partition (native-ufs-probe=18) -----
+// The iPadOS 17.7.11 RestoreRamDisk is a bare APFS container whose only volume carries
+// no role and no root snapshot, so APFS refuses it on an ordinary block device. The real
+// device mounts it through the restore path, which APFS takes for a memory device (the
+// ramdisk iBoot hands over as rd=md0). A boot image cannot carry the 184 MiB container:
+// the bootloader caps the boot-image ramdisk at the 96 MiB boot partition. So the kernel
+// reads the container from the start of the userdata partition into wired memory, registers
+// that memory as md(N) and leaves it as rootdev; IOFindBSDRoot adopts it (peridot-bdevsw-root
+// .patch) and bsd_init's own vfs_mountroot mounts APFS from it.
+extern "C" dev_t mdevadd (int devid, uint64_t base, unsigned int size, int phys);
+static const uint64_t kApfsMdBytes = 184549376ULL;      // 4096 x 45056, the whole container
+static uint8_t *gApfsMdMemory = nullptr;
+
+static bool startApfsMdRoot ()
+{
+  const char *why = "";
+  if (!hostBringUp (&why)) {
+    panic ("NATIVE_UFS apfs-md: bring-up failed: %s", why);
+  }
+  uint32_t lun = 0;
+  uint64_t first = 0, blocks = 0;
+  if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) {
+    panic ("NATIVE_UFS apfs-md: no userdata partition in the GPT");
+  }
+  IOLog ("NATIVE_UFS apfs-md: userdata lun=%u first=%llx blocks=%llx\n", lun,
+         static_cast<unsigned long long> (first), static_cast<unsigned long long> (blocks));
+  if (blocks * 4096ULL < kApfsMdBytes) {
+    panic ("NATIVE_UFS apfs-md: userdata is smaller than the container");
+  }
+  gApfsMdMemory = static_cast<uint8_t *> (IOMalloc (kApfsMdBytes + 4096));
+  if (!gApfsMdMemory) {
+    panic ("NATIVE_UFS apfs-md: cannot allocate %llu bytes",
+           static_cast<unsigned long long> (kApfsMdBytes));
+  }
+  uint8_t *memory = reinterpret_cast<uint8_t *> ((reinterpret_cast<uint64_t> (gApfsMdMemory) + 4095) & ~4095ULL);
+  if (!native_ufs_part_read (lun, first, static_cast<uint32_t> (kApfsMdBytes / 4096), memory)) {
+    panic ("NATIVE_UFS apfs-md: reading the container from userdata failed");
+  }
+  if (le32 (memory + 0x20) != 0x4253584e) {
+    panic ("NATIVE_UFS apfs-md: no NXSB at +0x20 (magic %08x)", le32 (memory + 0x20));
+  }
+  if (!hostMediaOpen (first, blocks)) {
+    panic ("NATIVE_UFS apfs-md: cannot open the writable media window");
+  }
+  dev_t device = mdevadd (-1, reinterpret_cast<uint64_t> (memory) >> 12,
+                          static_cast<unsigned> (kApfsMdBytes >> 12), 0);
+  if (device == static_cast<dev_t> (-1)) {
+    panic ("NATIVE_UFS apfs-md: mdevadd refused the memory device");
+  }
+  rootdev = device;
+  IOLog ("NATIVE_UFS apfs-md: container at %llx read into md%d dev=%d major=%d minor=%d, rootdev set\n",
+         static_cast<unsigned long long> (first * 4096ULL), static_cast<int> (minor (device)),
+         static_cast<int> (device), major (device), minor (device));
+  return true;
+}
+
+// ---- APFS container as a published IOBlockStorageDevice (native-ufs-probe=20) ----
+// p324 proved every storage class is registered once offline-apfs-load=1 loads the APFS
+// kext and IOStorageFamily (regDrv=1 regMedia=1 regScheme=1 ... with zero instances). So the
+// chain only needs a device instance: publish the APFS container window as an
+// IOBlockStorageDevice, let IOBlockStorageDriver create the IOMedia, and report what appears,
+// including the APFS container scheme instances and the media's BSD name.
+static NativeUfsBlock *gApfsMediaDevice = nullptr;
+
+static void apfsMediaReportThread (void *argument, wait_result_t)
+{
+  IOSleep (static_cast<unsigned> (reinterpret_cast<uintptr_t> (argument)) * 1000);
+  IOLog ("NUA checkpoint=%u calls=%u,%u,%u,%u,%u,%u reads=%llu failures=%llu\n", gStartCheckpoint,
+         gDeviceCalls[0], gDeviceCalls[1], gDeviceCalls[2], gDeviceCalls[3], gDeviceCalls[4], gDeviceCalls[5],
+         (unsigned long long) native_ufs_block_reads, (unsigned long long) native_ufs_block_failures);
+  unsigned driverReg = 0, mediaReg = 0, schemeReg = 0, containerReg = 0;
+  unsigned driverInst = classInstances ("IOBlockStorageDriver", &driverReg);
+  unsigned mediaInst = classInstances ("IOMedia", &mediaReg);
+  unsigned schemeInst = classInstances ("AppleAPFSContainerScheme", &schemeReg);
+  unsigned containerInst = classInstances ("AppleAPFSContainer", &containerReg);
+  unsigned mediaCount = countService ("IOMedia");
+  unsigned driverCount = countService ("IOBlockStorageDriver");
+  char *text = static_cast<char *> (IOMalloc (1800));
+  int used = 0;
+  if (text) {
+    used = snprintf (text, 1800, "NATIVE_UFS apfs media\npublished=%u media=%u driver=%u\n"
+                     "regDrv=%u/%u regMedia=%u/%u regScheme=%u/%u regCont=%u/%u\n",
+                     native_ufs_blocks_published, mediaCount, driverCount,
+                     driverReg, driverInst, mediaReg, mediaInst, schemeReg, schemeInst,
+                     containerReg, containerInst);
+    OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+    OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+    while (iterator && used < 1500) {
+      IOService *media = OSDynamicCast (IOService, iterator->getNextObject ());
+      if (!media) break;
+      OSString *bsd = OSDynamicCast (OSString, media->getProperty (kIOBSDNameKey));
+      OSString *content = OSDynamicCast (OSString, media->getProperty ("Content"));
+      OSNumber *size = OSDynamicCast (OSNumber, media->getProperty ("Size"));
+      used += snprintf (text + used, 1800 - used, "%s %s size=%llx\n",
+                        bsd ? bsd->getCStringNoCopy () : "-",
+                        content ? content->getCStringNoCopy () : "-",
+                        size ? size->unsigned64BitValue () : 0ULL);
+    }
+    if (iterator) iterator->release ();
+    if (matching) matching->release ();
+    panic ("%s", text);
+  }
+  panic ("NATIVE_UFS apfs media: no report buffer");
+}
+
+// Publish the APFS container window and start the storage chain. Returns false when the
+// transport or the device object cannot be prepared.
+// Kernel block-device helpers used by APFS's container_rootmount: it bdevvp()s the device,
+// then VNOP_FSYNC()s it and maps any error to ENOTBLK. The probe repeats those calls on the
+// media device we publish, so the real error is visible instead of the mapped 15.
+struct vnode;
+struct vfs_context;
+extern "C" int bdevvp (dev_t, struct vnode **);
+extern "C" int VNOP_FSYNC (struct vnode *, int, struct vfs_context *);
+extern "C" struct vfs_context *vfs_context_kernel (void);
+// Runtime trust cache query (native-ufs-probe=31): the kernel exports query_trust_cache()
+// (kern_trustcache.c), which is exactly what pmap/AMFI use for cdhash membership. Querying the
+// dyld and launchd hashes shows whether the DarwinBoot bundle really reached the runtime cache.
+struct PeridotQueryToken { const void *trustCache; const void *trustCacheEntry; };
+extern "C" unsigned int query_trust_cache (unsigned char query_type, const unsigned char *cdhash,
+                                            void *query_token);
+static const unsigned char kDyldCdhash[20] = { 0xb4, 0x79, 0xf9, 0x0e, 0x05, 0x54, 0x53, 0x14, 0xcb, 0x84,
+                                               0x34, 0x10, 0xc3, 0xd9, 0x8e, 0xf8, 0x4d, 0x92, 0x67, 0x10 };
+static const unsigned char kLaunchdCdhash[20] = { 0x1d, 0x52, 0xc6, 0x97, 0x47, 0xdf, 0xfc, 0x4b, 0x19, 0x37,
+                                                  0xd2, 0x41, 0xbd, 0xbc, 0x9c, 0xee, 0x3b, 0x22, 0xdf, 0x18 };
+static const unsigned char kBogusCdhash[20] = { 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad,
+                                                0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef };
+static void trustQueryThread (void *, wait_result_t)
+{
+  IOSleep (3000);
+  char *text = static_cast<char *> (IOMalloc (900));
+  if (!text) panic ("NATIVE_UFS trustq: no buffer");
+  int used = 0;
+  used += snprintf (text + used, 900, "NATIVE_UFS trustq\n");
+  for (unsigned type = 0; type <= 2 && used < 800; type++) {
+    PeridotQueryToken token = { nullptr, nullptr };
+    unsigned int rDyld = query_trust_cache (static_cast<unsigned char> (type), kDyldCdhash, &token);
+    PeridotQueryToken token2 = { nullptr, nullptr };
+    unsigned int rLaunchd = query_trust_cache (static_cast<unsigned char> (type), kLaunchdCdhash, &token2);
+    PeridotQueryToken token3 = { nullptr, nullptr };
+    unsigned int rBogus = query_trust_cache (static_cast<unsigned char> (type), kBogusCdhash, &token3);
+    used += snprintf (text + used, 900 - used, "t%u dyld=%u launchd=%u bogus=%u\n",
+                      type, rDyld, rLaunchd, rBogus);
+  }
+  panic ("%s", text);
+}
+// Root filesystem report (native-ufs-probe=32): the boot screen cannot tell mockfs from apfs,
+// so this asks the exported vfs helpers which filesystem actually owns the root vnode.
+extern "C" {
+struct vnode;
+struct mount;
+extern struct vnode *rootvnode;
+extern struct mount *vnode_mount (struct vnode *);
+extern int vfs_name (struct mount *, char *, size_t);
+}
+static void rootFsReportThread (void *, wait_result_t)
+{
+  IOSleep (15000);
+  char fsname[64] = "?";
+  struct vnode *rv = rootvnode;
+  struct mount *mp = rv ? vnode_mount (rv) : nullptr;
+  if (mp) vfs_name (mp, fsname, sizeof (fsname));
+  panic ("NATIVE_UFS rootfs fs=%s rootvnode=%p mount=%p", fsname,
+         reinterpret_cast<void *> (rv), reinterpret_cast<void *> (mp));
+}
+
+static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
+{
+  const char *why = "";
+  if (!hostBringUp (&why)) {
+    panic ("NATIVE_UFS apfs-media: bring-up failed: %s", why);
+  }
+  uint32_t lun = 0;
+  uint64_t first = 0, blocks = 0;
+  if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) {
+    panic ("NATIVE_UFS apfs-media: no userdata partition in the GPT");
+  }
+  if (blocks * 4096ULL < kApfsMdBytes) {
+    panic ("NATIVE_UFS apfs-media: userdata is smaller than the container");
+  }
+  uint64_t absolute = first * 4096ULL;
+  IOLog ("NATIVE_UFS apfs-media: userdata abs=%llx bytes=%llx\n",
+         static_cast<unsigned long long> (absolute),
+         static_cast<unsigned long long> (kApfsMdBytes));
+  gAllowUnverifiedRoot = true;
+  gPendingHost = host;
+  NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+  if (!device || !device->init (static_cast<OSDictionary *> (nullptr))) {
+    panic ("NATIVE_UFS apfs-media: device allocation failed");
+  }
+  OSString *generic = OSString::withCString ("Generic");
+  if (generic) {
+    device->setProperty ("device-type", generic);
+    generic->release ();
+  }
+  if (!device->configure ("APFSContainer", absolute, kApfsMdBytes)) {
+    panic ("NATIVE_UFS apfs-media: configure failed");
+  }
+  if (!device->attach (host)) {
+    panic ("NATIVE_UFS apfs-media: attach failed");
+  }
+  gApfsMediaDevice = device;
+  gStorageCatalogueAfter = catalogueMatches (device);
+  IOLog ("NATIVE_UFS apfs-media: cat=%u\n", gStorageCatalogueAfter);
+  if (!device->start (host)) {
+    panic ("NATIVE_UFS apfs-media: start failed");
+  }
+  publishNativeBdev ();
+  native_ufs_blocks_published = native_ufs_blocks_published + 1;
+  IOLog ("NATIVE_UFS apfs-media: published %s\n", device->windowLabel ());
+  if (rootMode) {
+    dev_t mediaDev = static_cast<dev_t> (-1);
+    for (unsigned tick = 0; tick < 150 && mediaDev == static_cast<dev_t> (-1); ++tick) {
+      OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+      OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+      while (iterator) {
+        IOService *media = OSDynamicCast (IOService, iterator->getNextObject ());
+        if (!media) break;
+        OSString *bsd = OSDynamicCast (OSString, media->getProperty (kIOBSDNameKey));
+        OSNumber *maj = OSDynamicCast (OSNumber, media->getProperty ("BSD Major"));
+        OSNumber *min = OSDynamicCast (OSNumber, media->getProperty ("BSD Minor"));
+        const char *bsdName = bsd ? bsd->getCStringNoCopy () : nullptr;
+        if (bsd && maj && min && bsdName && strncmp (bsdName, "disk", 4) == 0) {
+          mediaDev = makedev (maj->unsigned32BitValue (), min->unsigned32BitValue ());
+          IOLog ("NATIVE_UFS apfs-root: media %s dev=%d (%u/%u)\n", bsdName,
+                 static_cast<int> (mediaDev), maj->unsigned32BitValue (), min->unsigned32BitValue ());
+          break;
+        }
+      }
+      if (iterator) iterator->release ();
+      if (matching) matching->release ();
+      if (mediaDev == static_cast<dev_t> (-1)) IOSleep (100);
+    }
+    if (diagnose) {
+      // Every IOMedia property that can identify or locate its BSD device. The partition media
+      // reports no BSD Major/Minor on this chain, so the table has to show what it does carry.
+      char *text = static_cast<char *> (IOMalloc (1800));
+      int used = 0;
+      if (text) {
+        used = snprintf (text, 1800, "NATIVE_UFS apfs media table\nrootdev=%d catalogue=%u\n",
+                         static_cast<int> (rootdev), gStorageCatalogueAfter);
+        OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+        OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+        while (iterator && used < 1650) {
+          IOService *media = OSDynamicCast (IOService, iterator->getNextObject ());
+          if (!media) break;
+          OSString *bsd = OSDynamicCast (OSString, media->getProperty (kIOBSDNameKey));
+          OSString *content = OSDynamicCast (OSString, media->getProperty ("Content"));
+          OSNumber *size = OSDynamicCast (OSNumber, media->getProperty ("Size"));
+          OSNumber *maj = OSDynamicCast (OSNumber, media->getProperty ("BSD Major"));
+          OSNumber *min = OSDynamicCast (OSNumber, media->getProperty ("BSD Minor"));
+          OSNumber *unit = OSDynamicCast (OSNumber, media->getProperty ("BSD Unit"));
+          OSNumber *part = OSDynamicCast (OSNumber, media->getProperty ("BSD Partition"));
+          OSNumber *whole = OSDynamicCast (OSNumber, media->getProperty ("Whole"));
+          OSNumber *leaf = OSDynamicCast (OSNumber, media->getProperty ("Leaf"));
+          used += snprintf (text + used, 1800 - used,
+                            "%s c=%s sz=%llx maj=%u min=%u dv=%d u=%u p=%u w=%u l=%u\n",
+                            bsd ? bsd->getCStringNoCopy () : "-",
+                            content ? content->getCStringNoCopy () : "-",
+                            size ? size->unsigned64BitValue () : 0ULL,
+                            maj ? maj->unsigned32BitValue () : 0xffffffffu,
+                            min ? min->unsigned32BitValue () : 0xffffffffu,
+                            (maj && min) ? static_cast<int> (makedev (maj->unsigned32BitValue (), min->unsigned32BitValue ())) : -1,
+                            unit ? unit->unsigned32BitValue () : 0xffffffffu,
+                            part ? part->unsigned32BitValue () : 0xffffffffu,
+                            whole ? whole->unsigned32BitValue () : 0xffffffffu,
+                            leaf ? leaf->unsigned32BitValue () : 0xffffffffu);
+        }
+        if (iterator) iterator->release ();
+        if (matching) matching->release ();
+        if (mediaDev != static_cast<dev_t> (-1) && used < 1500) {
+          struct vnode *dvp = nullptr;
+          int bdError = bdevvp (mediaDev, &dvp);
+          int fsError = -1;
+          if (dvp) {
+            fsError = VNOP_FSYNC (dvp, 1 /* MNT_WAIT */, vfs_context_kernel ());
+          }
+          used += snprintf (text + used, 1800 - used,
+                            "probe: dev=%d bdevvp=%d vp=%p fsync=%d\n",
+                            static_cast<int> (mediaDev), bdError,
+                            reinterpret_cast<void *> (dvp), fsError);
+        }
+        panic ("%s", text);
+      }
+      panic ("NATIVE_UFS apfs media table: no buffer");
+    }
+    if (mediaDev != static_cast<dev_t> (-1)) {
+      rootdev = mediaDev;
+      native_ufs_bdev_absolute = absolute;
+      native_ufs_bdev_bytes = kApfsMdBytes;
+      IOLog ("NATIVE_UFS apfs-root: rootdev set to %d\n", static_cast<int> (mediaDev));
+    } else {
+      IOLog ("NATIVE_UFS apfs-root: no media device appeared\n");
+    }
+    return true;
+  }
+  if (!report) {
+    return true;
+  }
+  unsigned reportDelay = 40;
+  PE_parse_boot_argn ("native-ufs-report-delay", &reportDelay, sizeof (reportDelay));
+  thread_t thread = nullptr;
+  if (kernel_thread_start (apfsMediaReportThread, reinterpret_cast<void *> (static_cast<uintptr_t> (reportDelay)), &thread) != KERN_SUCCESS) {
+    panic ("NATIVE_UFS apfs-media: cannot start the report thread");
+  }
+  thread_deallocate (thread);
+  return true;
 }
 
 static char gMediaReport[3000];
@@ -3086,6 +3467,110 @@ bool NativeUfs::start (IOService *provider)
              buf[0], buf[1], buf[2], buf[3]);
       IOFree (buf, 4096);
     }
+    return true;
+  }
+  if (probe == 20) {
+    // Publish the APFS container as an IOBlockStorageDevice and report the storage chain.
+    return startApfsMediaRoot (this, false, false);
+  }
+  if (probe == 21) {
+    // Publish it, wait for the partition media, and hand its bdevsw device to rootdev.
+    return startApfsMediaRoot (this, true, false);
+  }
+  if (probe == 22) {
+    // Same handoff as probe 21, but report the state instead of letting mountroot retry.
+    return startApfsMediaRoot (this, true, true);
+  }
+  if (probe == 30) {
+    // Read what DarwinBoot wrote into /chosen/memory-map: the trust cache handoff either
+    // exists (address and size non-zero) or the payload/firmware never delivered it.
+    IORegistryEntry *map = IORegistryEntry::fromPath ("/chosen/memory-map", gIODTPlane);
+    OSData *tc = map ? OSDynamicCast (OSData, map->getProperty ("TrustCache")) : nullptr;
+    OSData *rd = map ? OSDynamicCast (OSData, map->getProperty ("RAMDisk")) : nullptr;
+    uint64_t tcAddr = 0, tcSize = 0, rdAddr = 0, rdSize = 0;
+    if (tc && tc->getLength () >= 16) {
+      const uint64_t *v = static_cast<const uint64_t *> (tc->getBytesNoCopy ());
+      tcAddr = v[0]; tcSize = v[1];
+    }
+    if (rd && rd->getLength () >= 16) {
+      const uint64_t *v = static_cast<const uint64_t *> (rd->getBytesNoCopy ());
+      rdAddr = v[0]; rdSize = v[1];
+    }
+    IORegistryEntry *chosen = IORegistryEntry::fromPath ("/chosen", gIODTPlane);
+    OSData *bootargs = chosen ? OSDynamicCast (OSData, chosen->getProperty ("boot-args")) : nullptr;
+    int argsLen = bootargs ? static_cast<int> (bootargs->getLength ()) : -1;
+    panic ("NATIVE_UFS dt: map=%d tc=%d(%llx/%llx) rd=%d(%llx/%llx) chosen=%d args=%d",
+           map ? 1 : 0, tc ? 1 : 0,
+           static_cast<unsigned long long> (tcAddr), static_cast<unsigned long long> (tcSize),
+           rd ? 1 : 0,
+           static_cast<unsigned long long> (rdAddr), static_cast<unsigned long long> (rdSize),
+           chosen ? 1 : 0, argsLen);
+  }
+  if (probe == 31) {
+    thread_t thread = nullptr;
+    if (kernel_thread_start (trustQueryThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS trustq: cannot start the thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  if (probe == 32) {
+    thread_t thread = nullptr;
+    if (kernel_thread_start (rootFsReportThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS rootfs: cannot start the thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  if (probe == 33) {
+    // Write-path self test: flip bytes in one userdata block, read it back, then restore the
+    // original bytes and verify the restore. The root device is the md ramdisk, so this block
+    // is not referenced by any mounted filesystem.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS writetest: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks))
+      panic ("NATIVE_UFS writetest: no userdata partition");
+    uint8_t *orig = static_cast<uint8_t *> (IOMalloc (4096));
+    uint8_t *work = static_cast<uint8_t *> (IOMalloc (4096));
+    uint8_t *back = static_cast<uint8_t *> (IOMalloc (4096));
+    if (!orig || !work || !back) panic ("NATIVE_UFS writetest: no buffers");
+    bool mediaOpened = hostMediaOpen (first, blocks);
+    uint64_t lba = first + 8;
+    IOReturn readRc = hostRead4k (lun, lba, 1, orig);
+    memcpy (work, orig, 4096);
+    for (unsigned i = 0; i < 4096; i += 64) work[i] = static_cast<uint8_t> (work[i] ^ 0xa5);
+    IOReturn writeRc = hostWrite4k (lun, lba, 1, work, true);
+    IOReturn backRc = hostRead4k (lun, lba, 1, back);
+    int matched = (backRc == kIOReturnSuccess) && !memcmp (back, work, 4096);
+    IOReturn restoreRc = hostWrite4k (lun, lba, 1, orig, true);
+    IOReturn checkRc = hostRead4k (lun, lba, 1, back);
+    int restored = (checkRc == kIOReturnSuccess) && !memcmp (back, orig, 4096);
+    panic ("NATIVE_UFS writetest lba=%llx window=%d read=%d write=%d reread=%d match=%d restore=%d/%d ok=%d",
+           static_cast<unsigned long long> (lba), mediaOpened ? 1 : 0, static_cast<int> (readRc), static_cast<int> (writeRc),
+           static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
+           (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+  }
+  if (probe == 18) {
+    // Root = the APFS container at the start of userdata, read into a memory device.
+    if (!startApfsMdRoot ()) {
+      return false;
+    }
+    // Publish the same window as a writable IOBlockStorageDevice, so the storage stack also
+    // exposes /dev/disk0s1 with write protection off while the root stays on the md ramdisk.
+    // No diagnostic report thread here: this boot is meant to stay up and run userspace.
+    return startApfsMediaRoot (this, false, false, false);
+  }
+  if (probe == 19) {
+    // No hardware: report the IOKit class/catalogue state the APFS container chain needs.
+    unsigned delay = 3;
+    PE_parse_boot_argn ("native-ufs-report-delay", &delay, sizeof (delay));
+    thread_t thread = nullptr;
+    if (kernel_thread_start (iokitStateThread, reinterpret_cast<void *> (static_cast<uintptr_t> (delay)), &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS iokit state: cannot start the thread");
+    }
+    thread_deallocate (thread);
     return true;
   }
   if (probe == 13) {

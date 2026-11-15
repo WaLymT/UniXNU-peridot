@@ -1,0 +1,52 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -390,6 +390,11 @@
+ /* peridot: 0 untouched, 1 execve, 2 activate, 3 perms ok, 4 header ok,
+  * 6 load_machfile, 7 parse_machfile, 11..14 rejection points. */
+ int peridot_exec_stage = 0;
++int peridot_hdr_read_error = -1;
++unsigned int peridot_hdr_read_resid;
++unsigned long long peridot_hdr_attr_size, peridot_hdr_attr_total;
++unsigned int peridot_hdr_attr_type, peridot_hdr_attr_mode;
++unsigned int peridot_hdr_magic;
+ unsigned int peridot_macho_magic, peridot_macho_filetype, peridot_macho_flags;
+ unsigned int peridot_check_flags, peridot_check_bits;
+ static int exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp);
+@@ -2301,10 +2306,23 @@
+ 	    UIO_SYSSPACE, IO_NODELOCKED,
+ 	    vfs_context_ucred(imgp->ip_vfs_context),
+ 	    &resid, vfs_context_proc(imgp->ip_vfs_context));
++	peridot_hdr_read_error = error;
++	peridot_hdr_read_resid = 0;
++	peridot_hdr_attr_size = imgp->ip_vattr ? (unsigned long long)imgp->ip_vattr->va_data_size : 0;
++	peridot_hdr_attr_total = imgp->ip_vattr ? (unsigned long long)imgp->ip_vattr->va_total_size : 0;
++	peridot_hdr_attr_type = imgp->ip_vattr ? (unsigned int)imgp->ip_vattr->va_type : 0;
++	peridot_hdr_attr_mode = imgp->ip_vattr ? (unsigned int)imgp->ip_vattr->va_mode : 0;
++	if (imgp->ip_vdata) {
++		peridot_hdr_magic = ((uint32_t)(uint8_t)imgp->ip_vdata[0] << 24) |
++		    ((uint32_t)(uint8_t)imgp->ip_vdata[1] << 16) |
++		    ((uint32_t)(uint8_t)imgp->ip_vdata[2] << 8) |
++		    (uint32_t)(uint8_t)imgp->ip_vdata[3];
++	}
+ 	if (error) {
+ 		goto bad;
+ 	}
+ 
++	peridot_hdr_read_resid = (unsigned int)resid;
+ 	if (resid) {
+ 		memset(imgp->ip_vdata + (PAGE_SIZE - resid), 0x0, resid);
+ 	}
+@@ -7208,7 +7226,12 @@
+ 		}
+ 	}
+ 
+-	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i - 1]), error);
++	panic("peridot-init-exec err %d stage %d hdr %d resid %u vsize %x %x vtotal %x %x"
++	    " vtype %u vmode %x vmagic %x", error, peridot_exec_stage,
++	    peridot_hdr_read_error, peridot_hdr_read_resid,
++	    (unsigned)(peridot_hdr_attr_size >> 32), (unsigned)peridot_hdr_attr_size,
++	    (unsigned)(peridot_hdr_attr_total >> 32), (unsigned)peridot_hdr_attr_total,
++	    peridot_hdr_attr_type, peridot_hdr_attr_mode, peridot_hdr_magic);
+ }
+ 
+ /*

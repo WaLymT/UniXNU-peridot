@@ -82,7 +82,14 @@ SHIP_MODE = "FALSE"
 
 [payload]
 volume = "PERIDOT"
-size_mib = 192
+# StaticTrustCache (v2, 2478) + RestoreTrustCache converted from v1 (267 entries):
+# DarwinBoot copies the bundle to /chosen/memory-map/TrustCache for AMFI.
+trust_cache_sha256 = ["32462f52946f5f53953c1fa0a679241eddb1226c9ecdfd318f9bea24836d860d"]
+# 64 MiB: the APFS root bring-up (probe 18) reads the 184 MB container from the start of
+# the userdata partition instead of shipping it in the payload, so the volume only has to
+# hold kernel.macho (51 MB) + ADT + a small Data seed. It must also stay under the 96 MiB
+# boot-image ramdisk limit the bootloader enforces (96 MiB boots, 128 MiB is refused).
+size_mib = 64
 loader = "firmware"
 title = "UniXNU (peridot)"
 # The panic screen and the entry probe share the kernel's padding, and together
@@ -108,7 +115,22 @@ dram_size = "0x80000000"
 # Route 3 (2026-11-15): the root is a RAM disk instead of the APFS container.
 # rd=md0 makes bsd_init root on the Data ramdisk; mockfs turns the Mach-O at its start
 # into /sbin/launchd. The UFS driver stays off so it cannot steal rootdev.
-kernel_args = ["-v", "rd=md0", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1"]
+# Probe 18 is the APFS memory-device root: the kernel brings the UFS transport up,
+# reads the 184,549,376-byte APFS container from userdata offset 0 into wired memory,
+# registers it as md(N) and leaves it as rootdev for IOFindBSDRoot to adopt. rd=md0 is
+# gone because the root is no longer the ADT Data ramdisk; mockfs stays as the last
+# mountroot candidate.
+# peridot-apfs-vfsmount=1 makes vfs_mountroot() mount the APFS volume through a direct
+# VFS_MOUNT instead of apfs_vfsop_mountroot(), whose root-volume selection refuses this
+# role-less, snapshot-less RestoreRamDisk container (p115 saw ENOENT at
+# apfs_vfsop_mount:2479; p307 proved mockfs was taking the root instead).
+# offline-apfs-load=1 is what makes APFS reachable at all: the prelinked apfs kext does not
+# put its vfs into vfsconf during prelink, and bsd_init() runs the UniXNU load probe
+# (patches/xnu/offline-component-load-probes.patch) right after vfsinit(), which calls
+# OSKextLoadKextWithIdentifier("com.apple.filesystems.apfs") and the kext registers itself.
+# p314 proved vfsconf had only devfs/mockfs at mountroot time (seen 0), so this is the gate.
+# rd= stays absent: IOFindBSDRoot() resolves it before NativeUfs builds md1 (p309).
+kernel_args = ["-v", "native-ufs-probe=18", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1", "offline-apfs-load=1", "rd=md1", "amfi-allows-trust-cache-load=1", "amfi_allow_any_signature=1", "-restore"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
@@ -121,9 +143,10 @@ owned_memory_size = "0x100000000"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
 packed_data_ramdisk = false
-# TODO(verify): a property of the iPadOS 17.7.11 Data image, copied from the
-# sheng board. Re-derive it from the selected IPSW before the payload step.
-root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# The volume UUID of the APFS container this board now roots from: the RestoreRamDisk of
+# iPadOS 17.7.11 21H461 (restore-ramdisk.img), read with libfsapfs. The previous value was
+# the Data update volume copied from the sheng board.
+root_match_volume_uuid = "9071148B-B025-402D-AD7A-48464D8B5FFF"
 unique_chip_id = "required"
 
 # Persistent panic log: pexpert check_for_panic_log() maps /pram and keeps the last panic

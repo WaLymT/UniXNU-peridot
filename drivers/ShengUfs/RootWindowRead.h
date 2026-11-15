@@ -52,3 +52,37 @@ static UfsWindowResult ufsReadWindow (Ops &ops, uint64_t absolute, uint64_t byte
   }
   return result;
 }
+
+// Shared production window writer. The same window geometry and lock guard as the reader.
+// Writes that do not cover whole 4096-byte transport blocks are read-modify-write: the
+// device contract is 512-byte sectors on top of 4096-byte UFS blocks.
+template <class Ops>
+static UfsWindowResult ufsWriteWindow (Ops &ops, uint64_t absolute, uint64_t bytes,
+                                       uint64_t block, uint64_t count, uint8_t *bounce)
+{
+  if (!bounce || !ufsWindowGeometry (absolute, bytes) || !count || block >= bytes / 512 || count > bytes / 512 - block)
+    return { kIOReturnBadArgument, 0 };
+  UfsWindowGuard<Ops> guard (ops);
+  uint64_t start = absolute + block * 512, remaining = count * 512;
+  UfsWindowResult result = { kIOReturnSuccess, 0 };
+  while (remaining) {
+    uint64_t lba = (start + result.done) / 4096, skip = (start + result.done) % 4096;
+    uint64_t blocks = (skip + remaining + 4095) / 4096;
+    if (blocks > kDataMax / 4096) blocks = kDataMax / 4096;
+    uint64_t capacity = blocks * 4096;
+    uint64_t usable = capacity - skip;
+    if (usable > remaining) usable = remaining;
+    bool wholeBlocks = (skip == 0 && usable == capacity);
+    if (!wholeBlocks) {
+      result.status = ops.read (lba, static_cast<uint32_t> (blocks), bounce);
+      if (result.status != kIOReturnSuccess) break;
+    }
+    uint64_t gathered = ops.gather (result.done, bounce + skip, usable);
+    if (gathered != usable) { result.status = kIOReturnIOError; break; }
+    result.status = ops.write (lba, static_cast<uint32_t> (blocks), bounce);
+    if (result.status != kIOReturnSuccess) break;
+    result.done += usable;
+    remaining -= usable;
+  }
+  return result;
+}

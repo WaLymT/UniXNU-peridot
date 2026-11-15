@@ -1,0 +1,109 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1210,6 +1210,17 @@
+ /* peridot: mount the APFS volume directly instead of through apfs_vfsop_mountroot(),
+  * which mounts the sealed root snapshot. The IPSW image on this port has no such
+  * snapshot; mounting the volume itself is what proves the storage path. */
++/* peridot: APFS mount diagnostics. mockfs is compiled in and is the last vfs_mountroot()
++ * candidate, so a refused or never-attempted APFS mount is otherwise silent: mockfs mounts
++ * the raw root device and the failure only shows up as an ENOEXEC on the fake launchd. */
++int peridot_mountroot_apfs_error = -1000;
++int peridot_mountroot_apfs_vfsmount_error = -1000;
++int peridot_apfs_vfsp_seen;
++int peridot_apfs_vfsp_has_mountroot;
++int peridot_apfs_vfsp_flags;
++unsigned int peridot_vfs_names[8];
++int peridot_vfs_count;
++
+ static int peridot_apfs_vfsmount = -1;
+ 
+ static boolean_t
+@@ -1260,6 +1271,7 @@
+ 		KDBG_RELEASE(DBG_MOUNTROOT | DBG_FUNC_END, error, 1);
+ 		return error;
+ 	}
++	printf ("peridot-mountroot: rootdev=%d major=%d minor=%d blk=%d\n", (int)rootdev, major(rootdev), minor(rootdev), (int)(rootvp->v_type == VBLK));
+ 	/*
+ 	 * 4951998 - code we call in vfc_mountroot may replace rootvp
+ 	 * so keep a local copy for some house keeping.
+@@ -1267,8 +1279,23 @@
+ 	bdevvp_rootvp = rootvp;
+ 
+ 	for (vfsp = vfsconf; vfsp; vfsp = vfsp->vfc_next) {
++		if (peridot_vfs_count < 8) {
++			const char *vfname = vfsp->vfc_name;
++			peridot_vfs_names[peridot_vfs_count] =
++			    ((unsigned int)(unsigned char)vfname[0] << 24) |
++			    ((unsigned int)(unsigned char)vfname[1] << 16) |
++			    ((unsigned int)(unsigned char)vfname[2] << 8) |
++			    (unsigned int)(unsigned char)vfname[3];
++		}
++		peridot_vfs_count++;
++		if (strcmp(vfsp->vfc_name, "apfs") == 0) {
++			peridot_apfs_vfsp_seen = 1;
++			peridot_apfs_vfsp_has_mountroot = vfsp->vfc_mountroot != NULL;
++			peridot_apfs_vfsp_flags = (int)vfsp->vfc_vfsflags;
++		}
+ 		if (vfsp->vfc_mountroot == NULL
+-		    && !ISSET(vfsp->vfc_vfsflags, VFC_VFSCANMOUNTROOT)) {
++		    && !ISSET(vfsp->vfc_vfsflags, VFC_VFSCANMOUNTROOT)
++		    && strcmp(vfsp->vfc_name, "apfs") != 0) {
+ 			continue;
+ 		}
+ 
+@@ -1277,10 +1304,17 @@
+ 
+ 		if (peridot_apfs_vfsmount_enabled() && strcmp(vfsp->vfc_name, "apfs") == 0) {
+ 			error = VFS_MOUNT(mp, rootvp, 0, ctx);
++			peridot_mountroot_apfs_vfsmount_error = error;
+ 		} else if (vfsp->vfc_mountroot) {
+ 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);
++			if (strcmp(vfsp->vfc_name, "apfs") == 0) {
++				peridot_mountroot_apfs_error = error;
++			}
+ 		} else {
+ 			error = VFS_MOUNT(mp, rootvp, 0, ctx);
++			if (strcmp(vfsp->vfc_name, "apfs") == 0) {
++				peridot_mountroot_apfs_vfsmount_error = error;
++			}
+ 		}
+ 
+ 		if (!error) {
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -390,6 +390,13 @@
+ /* peridot: 0 untouched, 1 execve, 2 activate, 3 perms ok, 4 header ok,
+  * 6 load_machfile, 7 parse_machfile, 11..14 rejection points. */
+ int peridot_exec_stage = 0;
++extern int peridot_mountroot_apfs_error, peridot_mountroot_apfs_vfsmount_error;
++extern int peridot_apfs_vfsp_seen, peridot_apfs_vfsp_has_mountroot, peridot_apfs_vfsp_flags;
++extern unsigned int peridot_vfs_names[8];
++extern int peridot_vfs_count;
++extern volatile int native_apfs_load_status;
++extern volatile unsigned int native_apfs_registered;
++extern volatile uintptr_t native_apfs_vfsops;
+ int peridot_hdr_read_error = -1;
+ unsigned int peridot_hdr_read_resid;
+ unsigned long long peridot_hdr_attr_size, peridot_hdr_attr_total;
+@@ -7227,11 +7234,19 @@
+ 	}
+ 
+ 	panic("peridot-init-exec err %d stage %d hdr %d resid %u vsize %x %x vtotal %x %x"
+-	    " vtype %u vmode %x vmagic %x", error, peridot_exec_stage,
++	    " vtype %u vmode %x vmagic %x ape %d apm %d seen %d hmr %d fl %x" "\\n"
++	    "peridot-vfs n %d %x %x %x %x %x %x %x %x aps %d apr %d apv %x", error, peridot_exec_stage,
+ 	    peridot_hdr_read_error, peridot_hdr_read_resid,
+ 	    (unsigned)(peridot_hdr_attr_size >> 32), (unsigned)peridot_hdr_attr_size,
+ 	    (unsigned)(peridot_hdr_attr_total >> 32), (unsigned)peridot_hdr_attr_total,
+-	    peridot_hdr_attr_type, peridot_hdr_attr_mode, peridot_hdr_magic);
++	    peridot_hdr_attr_type, peridot_hdr_attr_mode, peridot_hdr_magic,
++	    peridot_mountroot_apfs_error, peridot_mountroot_apfs_vfsmount_error,
++	    peridot_apfs_vfsp_seen, peridot_apfs_vfsp_has_mountroot, peridot_apfs_vfsp_flags,
++	    peridot_vfs_count, peridot_vfs_names[0], peridot_vfs_names[1], peridot_vfs_names[2],
++	    peridot_vfs_names[3], peridot_vfs_names[4], peridot_vfs_names[5],
++	    peridot_vfs_names[6], peridot_vfs_names[7],
++	    (int)native_apfs_load_status, (int)native_apfs_registered,
++	    (unsigned)(native_apfs_vfsops & 0xffffffff));
+ }
+ 
+ /*

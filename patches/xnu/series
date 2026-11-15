@@ -13,3 +13,8 @@ peridot-ossymbol-caller.patch
 peridot-bdevsw-root.patch
 peridot-apfs-vfsmount.patch
 peridot-exec-diag.patch
+peridot-rootauth.patch
+peridot-init-exec-diag.patch
+peridot-mountroot-diag.patch
+peridot-apfs-register.patch
+peridot-rd-wait.patch

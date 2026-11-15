@@ -262,6 +262,19 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
 // root image; every write is checked against them again here, so nothing outside them can be written even if a caller is wrong.
 static bool gStoreOpen = false, gLogOpen = false;
 static uint64_t gStoreFirst = 0, gStoreBlocks = 0, gLogFirst = 0, gLogBlocks = 0;
+// The writable media window: opened by the APFS-container publication (probe 18) so the block
+// device the storage stack exposes can actually accept writes. Same bounds discipline as the
+// store and log windows: only the range handed over here may leave the host.
+static bool gMediaOpen = false;
+static uint64_t gMediaFirst = 0, gMediaBlocks = 0;
+static bool hostMediaOpen (uint64_t first, uint64_t blocks)
+{
+  if (!blocks || first > 0xffffffffULL || blocks > 0xffffffffULL - first) return false;
+  gMediaFirst = first;
+  gMediaBlocks = blocks;
+  gMediaOpen = true;
+  return true;
+}
 
 static bool hostLogOpen (uint64_t first, uint64_t blocks)
 {
@@ -276,7 +289,8 @@ static bool hostLogOpen (uint64_t first, uint64_t blocks)
 static bool hostInWindow (uint64_t lba, uint32_t blocks)
 {
   if (gStoreOpen && lba >= gStoreFirst && lba - gStoreFirst < gStoreBlocks && blocks <= gStoreBlocks - (lba - gStoreFirst)) return true;
-  return gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks && blocks <= gLogBlocks - (lba - gLogFirst);
+  if (gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks && blocks <= gLogBlocks - (lba - gLogFirst)) return true;
+  return gMediaOpen && lba >= gMediaFirst && lba - gMediaFirst < gMediaBlocks && blocks <= gMediaBlocks - (lba - gMediaFirst);
 }
 
 static bool hostStoreOpen (uint64_t first, uint64_t blocks)

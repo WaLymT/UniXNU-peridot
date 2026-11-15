@@ -1,0 +1,22 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -936,7 +936,18 @@
+ #endif // CONFIG_IMAGEBOOT
+ #elif !XNU_TARGET_OS_OSX
+ 		/* Non MacOS */
+-		require_rootauth = TRUE;
++		/* peridot: the RAM-disk bring-up root is an APFS container read into a memory
++		 * device by drivers/ShengUfs/NativeUfs.cpp (native-ufs-probe=18). It is a real
++		 * memory device, but bsd_rooted_ramdisk() only accepts rd=md0 and the Data seed
++		 * already owns md0, so the container lands on md1. The RestoreRamDisk volume
++		 * also carries no seal, so FSIOC_KERNEL_ROOTAUTH can only fail. Use the same
++		 * bring-up opt-out the exec path already honours. */
++		{
++			boolean_t peridot_allow_unsigned_root = FALSE;
++			PE_parse_boot_argn("peridot-allow-unsigned-root",
++			    &peridot_allow_unsigned_root, sizeof(peridot_allow_unsigned_root));
++			require_rootauth = peridot_allow_unsigned_root ? FALSE : TRUE;
++		}
+ #endif // XNU_TARGET_OS_OSX && defined(__arm64__)
+ 
+ 		if (require_rootauth) {

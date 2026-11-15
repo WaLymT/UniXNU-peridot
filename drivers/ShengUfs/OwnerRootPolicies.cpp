@@ -21,3 +21,9 @@ _verified_root_policies:
 .p2align 3
 _verified_root_policy_count:
     .quad 2
+
+/* peridot: com.apple.filesystems.apfs's own vfs registration routine in this pinned prelink
+ * (kernelcache + roots + slide are pinned, so the address is deterministic). Called from
+ * bsd/vfs/vfs_subr.c after vfsinit() so apfs re-enters vfsconf before vfs_mountroot(). */
+.globl _peridot_apfs_native_register
+.set _peridot_apfs_native_register, 0xfffffff00566a964
