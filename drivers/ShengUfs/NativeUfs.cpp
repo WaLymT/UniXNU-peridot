@@ -2841,6 +2841,7 @@ static void iokitStateThread (void *argument, wait_result_t)
 // start either blocks the publisher or leaves the driver without an instance,
 // so the window is exposed through bdevsw and devfs instead.
 
+static unsigned gBdevIoctlLog, gBdevIoctlOtherLog;
 static int nativeBdevOpen (dev_t, int, int, struct proc *) { return 0; }
 static int nativeBdevClose (dev_t, int, int, struct proc *) { return 0; }
 // spec_open() (bsd/miscfs/specfs/spec_vnops.c) opens a block device and then asks it
@@ -2851,6 +2852,11 @@ static int nativeBdevIoctl (dev_t, u_long command, caddr_t data, int, struct pro
 {
   if (!data) return EINVAL;
   gBdevIoctlCalls++;
+  // Diagnostic for the newfs_apfs run (probe 40): which ioctls the Apple tool uses on /dev/nu0.
+  if (gBdevIoctlLog < 40) {
+    gBdevIoctlLog++;
+    IOLog ("NATIVE_UFS ioctl #%u cmd=%lx\n", gBdevIoctlLog, static_cast<unsigned long> (command));
+  }
   switch (command) {
     case DKIOCGETBLOCKSIZE:
       *reinterpret_cast<uint32_t *> (data) = gBdevBlockSize;
@@ -2867,8 +2873,64 @@ static int nativeBdevIoctl (dev_t, u_long command, caddr_t data, int, struct pro
       *reinterpret_cast<uint64_t *> (data) = gBdevBytes / 512;
       gBdevIoctlCount++;
       return 0;
+    // Probe 40 showed the Apple tools need more of the disk ioctl contract than open() does:
+    // newfs_apfs asked for DKIOCGETFEATURES (0x4004644c), DKIOCISSOLIDSTATE (0x4004644f) and
+    // DKIOCSYNCHRONIZE (0x20006416) and got EINVAL, then exited 73 "unable to format".
+    case DKIOCSYNCHRONIZE:
+    case DKIOCSYNCHRONIZECACHE:
+      return 0;
+    case DKIOCGETFEATURES:
+      // Barriers are real: every write goes out with FUA. No unmap/priority.
+      *reinterpret_cast<uint32_t *> (data) = DK_FEATURE_BARRIER;
+      return 0;
+    case DKIOCISSOLIDSTATE:
+      *reinterpret_cast<uint32_t *> (data) = 1;
+      return 0;
+    case DKIOCISWRITABLE:
+      *reinterpret_cast<uint32_t *> (data) = 1;
+      return 0;
+    case DKIOCISFORMATTED:
+      *reinterpret_cast<uint32_t *> (data) = 1;
+      return 0;
+    case DKIOCGETPHYSICALBLOCKSIZE:
+      *reinterpret_cast<uint32_t *> (data) = 4096;
+      return 0;
+    case DKIOCGETMAXBLOCKCOUNTREAD:
+    case DKIOCGETMAXBLOCKCOUNTWRITE:
+      *reinterpret_cast<uint64_t *> (data) = kDataMax / 512;
+      return 0;
+    case DKIOCGETMAXBYTECOUNTREAD:
+    case DKIOCGETMAXBYTECOUNTWRITE:
+      *reinterpret_cast<uint64_t *> (data) = kDataMax;
+      return 0;
+    case DKIOCGETMAXSEGMENTCOUNTREAD:
+    case DKIOCGETMAXSEGMENTCOUNTWRITE:
+      *reinterpret_cast<uint64_t *> (data) = kDataMax / 4096;
+      return 0;
+    case DKIOCGETMAXSEGMENTBYTECOUNTREAD:
+    case DKIOCGETMAXSEGMENTBYTECOUNTWRITE:
+      *reinterpret_cast<uint64_t *> (data) = kDataMax;
+      return 0;
+    case DKIOCGETMINSEGMENTALIGNMENTBYTECOUNT:
+      *reinterpret_cast<uint64_t *> (data) = 4096;
+      return 0;
+    case DKIOCGETMAXSEGMENTADDRESSABLEBITCOUNT:
+      *reinterpret_cast<uint64_t *> (data) = 64;
+      return 0;
+    case DKIOCGETTHROTTLEMASK:
+      *reinterpret_cast<uint64_t *> (data) = 0;
+      return 0;
+    case DKIOCGETENCRYPTIONTYPE:
+      *reinterpret_cast<uint32_t *> (data) = 0;
+      return 0;
+    case DKIOCUNMAP:
+      return EOPNOTSUPP;
     default:
       gBdevIoctlOther++;
+      if (gBdevIoctlOtherLog < 20) {
+        gBdevIoctlOtherLog++;
+        IOLog ("NATIVE_UFS ioctl unknown cmd=%lx\n", static_cast<unsigned long> (command));
+      }
       return EINVAL;
   }
 }
@@ -2926,6 +2988,7 @@ static volatile uint32_t gBdevLastFailBytes = 0;
 static volatile int32_t gBdevLastFailStatus = 0;
 static volatile uint32_t gBdevLastFailWrite = 0;
 static volatile unsigned gBdevReads, gBdevWrites, gBdevFailures;
+static unsigned gBdevStratCalls;
 
 static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
 {
@@ -2978,6 +3041,16 @@ static void nativeBdevStrategy (struct buf *bp)
     return;
   }
 
+  // Diagnostic: the first calls show buffer types and pointer shapes. The p373 data abort
+  // happened inside the gather memmove of a caller pointer, so record flags/count/block/data
+  // for the first 60 requests.
+  gBdevStratCalls++;
+  if (gBdevStratCalls < 60 || (gBdevStratCalls % 64) == 0) {
+    IOLog ("NATIVE_UFS strat #%u flags=%x blk=%llx bytes=%u data=%llx\n", gBdevStratCalls,
+           static_cast<unsigned> (buf_flags (bp)), static_cast<unsigned long long> (block), count,
+           static_cast<unsigned long long> (reinterpret_cast<uintptr_t> (vaddr)));
+  }
+
   if (writing) {
     // The UFS window is writable (hostMediaOpen in the probe), so serve writes through the same
     // window writer the IOBlockStorageDevice path uses: WRITE(10) with FUA, read-modify-write
@@ -2998,8 +3071,16 @@ static void nativeBdevStrategy (struct buf *bp)
         return length;
       }
     } writeOperations = { vaddr };
-    UfsWindowResult outcome = ufsWriteWindow (writeOperations, gBdevAbsolute, gBdevBytes, block, count, gBdevBounce);
-    if (outcome.status != kIOReturnSuccess) error = EIO;
+    // udfWriteWindow's count is in 512-byte device blocks while buf_count() is in bytes: passing
+    // bytes made probe 40's first newfs write 8x too long and gather read past the caller buffer
+    // (p373/p375 data abort at data + 0x8000). Convert once, and refuse misaligned requests.
+    if ((count & 511U) != 0) {
+      error = EINVAL;
+    } else {
+      UfsWindowResult outcome = ufsWriteWindow (writeOperations, gBdevAbsolute, gBdevBytes, block,
+                                                count / 512U, gBdevBounce);
+      if (outcome.status != kIOReturnSuccess) error = EIO;
+    }
   } else {
     if (gBdevLock) IOLockLock (gBdevLock);
     error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (vaddr));
@@ -3474,25 +3555,39 @@ static void targetCheckThread (void *, wait_result_t)
   IOSleep (3000);
   uint8_t *block = static_cast<uint8_t *> (IOMalloc (4096));
   if (!block) panic ("NATIVE_UFS check: no buffer");
-  uint32_t found = 0, offset = 0, head = 0;
-  for (int attempt = 0; attempt < 8 && !found; attempt++) {
-    if (hostRead4k (0, gBdevAbsolute / 4096, 1, block) != kIOReturnSuccess) {
-      IOSleep (1000);
-      continue;
-    }
-    head = (static_cast<uint32_t> (block[0]) << 24) | (static_cast<uint32_t> (block[1]) << 16) |
-           (static_cast<uint32_t> (block[2]) << 8) | static_cast<uint32_t> (block[3]);
-    for (uint32_t i = 0; i + 3 < 4096; i++) {
-      if (block[i] == 'N' && block[i + 1] == 'X' && block[i + 2] == 'S' && block[i + 3] == 'B') {
-        found = 1;
-        offset = i;
+  const uint64_t firstLba = gBdevAbsolute / 4096;
+  uint32_t found = 0, offset = 0, head = 0, nzBlocks = 0, firstNz = 0xffffffffU;
+  for (int attempt = 0; attempt < 8 && !found && nzBlocks == 0; attempt++) {
+    for (uint32_t b = 0; b < 128; b++) {
+      if (hostRead4k (0, firstLba + b, 1, block) != kIOReturnSuccess) {
         break;
       }
+      uint32_t nz = 0;
+      for (uint32_t i = 0; i < 4096; i++) {
+        if (block[i]) nz++;
+      }
+      if (nz) {
+        nzBlocks++;
+        if (firstNz == 0xffffffffU) firstNz = b;
+      }
+      if (b == 0) {
+        head = (static_cast<uint32_t> (block[0]) << 24) | (static_cast<uint32_t> (block[1]) << 16) |
+               (static_cast<uint32_t> (block[2]) << 8) | static_cast<uint32_t> (block[3]);
+      }
+      for (uint32_t i = 0; i + 3 < 4096; i++) {
+        if (block[i] == 'N' && block[i + 1] == 'X' && block[i + 2] == 'S' && block[i + 3] == 'B') {
+          found = 1;
+          offset = b * 4096 + i;
+          break;
+        }
+      }
+      if (found) break;
     }
-    if (!found) IOSleep (1000);
+    if (!found && nzBlocks == 0) IOSleep (1000);
   }
-  panic ("NATIVE_UFS check: found=%d off=%d head=%08x ok=%d",
-         static_cast<int> (found), static_cast<int> (offset), head, found ? 1 : 0);
+  panic ("NATIVE_UFS check: found=%d off=%d head=%08x nz=%d firstnz=%d ok=%d",
+         static_cast<int> (found), static_cast<int> (offset), head, static_cast<int> (nzBlocks),
+         firstNz == 0xffffffffU ? -1 : static_cast<int> (firstNz), found ? 1 : 0);
 }
 static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
 {
