@@ -1,0 +1,32 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1096,6 +1096,29 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++	/* peridot: graft the SystemOS cryptex before launchd starts; it carries the dyld
++	 * shared cache that dyld needs for /sbin/launchd (see peridot-cryptex-graft.patch). */
++	{
++		extern int peridot_cryptex_graft(const char *, const char *, uint32_t, uint32_t,
++		    uint64_t);
++		char peridotDevPath[128] = "/dev/nu1";
++		char peridotMountPath[128] = "";
++		unsigned peridotGraftType = 1, peridotGraft4cc = 0, peridotGraftFlags = 0;
++		PE_parse_boot_argn("peridot-graft-dev", peridotDevPath, sizeof(peridotDevPath));
++		PE_parse_boot_argn("peridot-graft-mnt", peridotMountPath, sizeof(peridotMountPath));
++		PE_parse_boot_argn("peridot-graft-type", &peridotGraftType, sizeof(peridotGraftType));
++		PE_parse_boot_argn("peridot-graft-4cc", &peridotGraft4cc, sizeof(peridotGraft4cc));
++		PE_parse_boot_argn("peridot-graft-flags", &peridotGraftFlags, sizeof(peridotGraftFlags));
++		int peridotGraftError = peridot_cryptex_graft(peridotDevPath,
++		    peridotMountPath[0] ? peridotMountPath : NULL, peridotGraftType, peridotGraft4cc,
++		    peridotGraftFlags);
++		printf("peridot-cryptex: graft %s -> %s (type %u flags %x) = %d\n", peridotDevPath,
++		    peridotMountPath, peridotGraftType, peridotGraftFlags, peridotGraftError);
++		if (peridotGraftError) {
++			panic("peridot-cryptex: graft failed: %d", peridotGraftError);
++		}
++	}
++
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }

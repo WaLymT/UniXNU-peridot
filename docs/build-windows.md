@@ -144,3 +144,13 @@ rm <tree>/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.
 - 改补丁 → 可以（会重渲染树，但 `.cache` 与 `build` 通常保留，慢一点而已）
 - 清 `build/xnu` → 会触发上面的重跑，可以接受，但**必须让它跑完**
 - 中途 kill 构建 → 最危险，会制造这种"半成品记录"状态
+
+### 护栏（2026-11-16）
+
+- `unixnu clean` 默认 dry-run，必须显式 `--yes` 才删；删前把 `xnu-inputs.json`、
+  `link.filelist`、`startup.o.json` 备份到 `out/<device>/<os>/clean-backup-<ts>/`。
+- `patches.prepare()` 不再 `rmtree` 旧的 `.cache/xnu-work`，而是改名为
+  `xnu-work.bak-<ts>` 并保留一份（`UNIXNU_KEEP_WORK_BACKUPS` 可调），补丁打不上时
+  也可以事后检查那棵树。
+
+工作区规则见根目录 `AGENTS.md` 第 8 节：**构建树不可清理**。

@@ -1600,6 +1600,10 @@ static volatile uintptr_t gBdevNode = 0;
 // bdevsw window geometry and the block-device ioctl answers, kept here so the mount
 // thread can report them before anything it calls can panic.
 static volatile uint64_t gBdevAbsolute = 0, gBdevBytes = 0;
+// Second bdevsw window (SystemOS cryptex staged on UFS, probe 45). The strategy picks the
+// window from major(buf_device(bp)).
+static uint64_t gBdev2Absolute = 0, gBdev2Bytes = 0;
+static int gBdev2Slot = -1;
 static unsigned gBdevIoctlCalls, gBdevIoctlSize, gBdevIoctlSetSize, gBdevIoctlCount, gBdevIoctlOther;
 static uint32_t gBdevBlockSize = 512;
 static void publishNativeBdev (bool claimRoot = true);
@@ -2848,9 +2852,10 @@ static int nativeBdevClose (dev_t, int, int, struct proc *) { return 0; }
 // for its block size, switches it to 512 to read the block count, and switches it
 // back. A GET or SET that fails turns the open into ENXIO, which is what made
 // bdevvp() panic and what kept vfs_mountroot() from ever running.
-static int nativeBdevIoctl (dev_t, u_long command, caddr_t data, int, struct proc *)
+static int nativeBdevIoctl (dev_t dev, u_long command, caddr_t data, int, struct proc *)
 {
   if (!data) return EINVAL;
+  const uint64_t bytes = (gBdev2Slot >= 0 && major (dev) == gBdev2Slot) ? gBdev2Bytes : gBdevBytes;
   gBdevIoctlCalls++;
   // Diagnostic for the newfs_apfs run (probe 40): which ioctls the Apple tool uses on /dev/nu0.
   if (gBdevIoctlLog < 40) {
@@ -2870,7 +2875,7 @@ static int nativeBdevIoctl (dev_t, u_long command, caddr_t data, int, struct pro
       return (requested == 512 || requested == gBdevBlockSize) ? 0 : EINVAL;
     }
     case DKIOCGETBLOCKCOUNT:
-      *reinterpret_cast<uint64_t *> (data) = gBdevBytes / 512;
+      *reinterpret_cast<uint64_t *> (data) = bytes / 512;
       gBdevIoctlCount++;
       return 0;
     // Probe 40 showed the Apple tools need more of the disk ioctl contract than open() does:
@@ -2990,10 +2995,11 @@ static volatile uint32_t gBdevLastFailWrite = 0;
 static volatile unsigned gBdevReads, gBdevWrites, gBdevFailures;
 static unsigned gBdevStratCalls;
 
-static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
+static int nativeBdevReadAt (uint64_t absolute, uint64_t bytes, uint64_t block, uint32_t count,
+                             uint8_t *data)
 {
   const bool invalid = !gBdevBounce || !data || !count || (count & 511) ||
-      block >= gBdevBytes / 512 || count > gBdevBytes - block * 512;
+      block >= bytes / 512 || count > bytes - block * 512;
   if (invalid) {
     // One line that says which precondition failed and with what geometry (EINVAL otherwise has
     // no visible cause on this board; p366 showed "op=0 err=22 lba=15ee8 bytes=4096").
@@ -3001,14 +3007,14 @@ static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
            " limit=%llx bytes=%llx\n",
            gBdevBounce ? 1 : 0, data ? 1 : 0, count, count & 511,
            static_cast<unsigned long long> (block),
-           static_cast<unsigned long long> (gBdevBytes / 512),
-           static_cast<unsigned long long> (gBdevBytes));
+           static_cast<unsigned long long> (bytes / 512),
+           static_cast<unsigned long long> (bytes));
     return EINVAL;
   }
   uint64_t start = block * 512, done = 0;
   while (done < count) {
-    uint64_t lba = (gBdevAbsolute + start + done) / 4096;
-    uint64_t skip = (gBdevAbsolute + start + done) % 4096;
+    uint64_t lba = (absolute + start + done) / 4096;
+    uint64_t skip = (absolute + start + done) % 4096;
     uint64_t blocks = (skip + count - done + 4095) / 4096;
     if (blocks > kDataMax / 4096) blocks = kDataMax / 4096;
     if (hostRead4k (0, lba, static_cast<uint32_t> (blocks), gBdevBounce) != kIOReturnSuccess)
@@ -3022,11 +3028,48 @@ static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
   return 0;
 }
 
+static int nativeBdevRead (uint64_t block, uint32_t count, uint8_t *data)
+{
+  return nativeBdevReadAt (gBdevAbsolute, gBdevBytes, block, count, data);
+}
+
+// Second bdevsw disk: the SystemOS cryptex container staged on UFS (probe 45). The strategy
+// selects the window by major(dev_t) so both disks share one implementation.
+static int nativeBdevOpen (dev_t, int, int, struct proc *);
+static int nativeBdevClose (dev_t, int, int, struct proc *);
+static void nativeBdevStrategy (struct buf *);
+static int nativeBdevIoctl (dev_t, u_long, caddr_t, int, struct proc *);
+static int nativeBdevPsize (dev_t);
+
+static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
+{
+  if (gBdev2Slot != -1) return;
+  static struct bdevsw operations2 = { nativeBdevOpen, nativeBdevClose, nativeBdevStrategy,
+                                       nativeBdevIoctl, enodev, nativeBdevPsize, D_DISK };
+  int slot = bdevsw_add (-1, &operations2);
+  if (slot < 0) {
+    panic ("NATIVE_UFS graft: second bdevsw slot failed");
+  }
+  gBdev2Slot = slot;
+  gBdev2Absolute = absolute;
+  gBdev2Bytes = bytes;
+  dev_t dev = makedev (slot, 0);
+  uintptr_t node = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "nu1"));
+  if (!node) IOLog ("NATIVE_UFS graft: devfs_make_node(nu1) failed\n");
+  IOLog ("NATIVE_UFS graft: nu1 slot=%d lba=%llx bytes=%llx\n", slot,
+         static_cast<unsigned long long> (absolute >> 12),
+         static_cast<unsigned long long> (bytes));
+}
+
 static void nativeBdevStrategy (struct buf *bp)
 {
   const uint64_t block = buf_blkno (bp);
   const uint32_t count = buf_count (bp);
   const bool writing = (buf_flags (bp) & B_READ) == 0;
+  const int slot = major (buf_device (bp));
+  const bool second = (gBdev2Slot >= 0 && slot == gBdev2Slot);
+  const uint64_t absolute = second ? gBdev2Absolute : gBdevAbsolute;
+  const uint64_t bytes = second ? gBdev2Bytes : gBdevBytes;
   int error = 0;
 
   // The page cache hands a strategy routine a B_PAGEIO buffer whose data area is a UPL, not a
@@ -3077,13 +3120,13 @@ static void nativeBdevStrategy (struct buf *bp)
     if ((count & 511U) != 0) {
       error = EINVAL;
     } else {
-      UfsWindowResult outcome = ufsWriteWindow (writeOperations, gBdevAbsolute, gBdevBytes, block,
+      UfsWindowResult outcome = ufsWriteWindow (writeOperations, absolute, bytes, block,
                                                 count / 512U, gBdevBounce);
       if (outcome.status != kIOReturnSuccess) error = EIO;
     }
   } else {
     if (gBdevLock) IOLockLock (gBdevLock);
-    error = nativeBdevRead (block, count, reinterpret_cast<uint8_t *> (vaddr));
+    error = nativeBdevReadAt (absolute, bytes, block, count, reinterpret_cast<uint8_t *> (vaddr));
     if (gBdevLock) IOLockUnlock (gBdevLock);
   }
   buf_unmap (bp);
@@ -3312,6 +3355,11 @@ extern "C" {
 // <sys/mount.h> provides vfs_name()/vfs_statfs(); vnode_mount is kernel-internal.
 extern struct vnode *rootvnode;
 extern struct mount *vnode_mount (struct vnode *);
+// peridot-cryptex-graft.patch: namei + vn_stat of an absolute path on the current root,
+// and the kernel-side APFS cryptex graft (FSIOC_GRAFT_FS) without the graftdmg entitlement.
+int peridot_path_probe (const char *path, uint64_t *outSize, unsigned *outIno);
+int peridot_cryptex_graft (const char *devPath, const char *mountPath, uint32_t graftType,
+                           uint32_t graft4cc, uint64_t graftFlags);
 }
 static void rootFsReportThread (void *, wait_result_t)
 {
@@ -3588,6 +3636,76 @@ static void targetCheckThread (void *, wait_result_t)
   panic ("NATIVE_UFS check: found=%d off=%d head=%08x nz=%d firstnz=%d ok=%d",
          static_cast<int> (found), static_cast<int> (offset), head, static_cast<int> (nzBlocks),
          firstNz == 0xffffffffU ? -1 : static_cast<int> (firstNz), found ? 1 : 0);
+}
+
+// ---- Cryptex bring-up path probe (native-ufs-probe=44) --------------------------------
+// The iPadOS System volume is mounted by probe 43/44, but dyld cannot load libSystem
+// because the shared cache lives in the SystemOS cryptex. Before implementing the graft,
+// ask the mounted root whether the classic dyld-cache directories exist and what they are.
+static void cryptexPathProbeThread (void *, wait_result_t)
+{
+  for (int i = 0; i < 300 && rootvnode == nullptr; i++) IOSleep (100);
+  static const char *paths[] = {
+    "/System/Library/Caches/com.apple.dyld",
+    "/System/Library/Caches",
+    "/usr/lib",
+    "/sbin/launchd",
+    "/System/Cryptexes",
+    "/System/Cryptexes/OS",
+    "/System/Library/dyld",
+    "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e",
+  };
+  char text[1500];
+  int used = snprintf (text, sizeof (text), "rootvnode=%p\n", reinterpret_cast<void *> (rootvnode));
+  for (unsigned i = 0; i < sizeof (paths) / sizeof (paths[0]); i++) {
+    uint64_t size = 0;
+    unsigned ino = 0;
+    int err = peridot_path_probe (paths[i], &size, &ino);
+    used += snprintf (text + used, sizeof (text) - used, "%s e=%d sz=%llu ino=%u\n",
+                      paths[i], err, static_cast<unsigned long long> (size), ino);
+    if (used >= static_cast<int> (sizeof (text)) - 200) break;
+  }
+  panic ("NATIVE_UFS cryptex paths\n%s", text);
+}
+
+// ---- SystemOS cryptex graft (native-ufs-probe=45) -------------------------------------
+// Publishes the staged SystemOS cryptex container as a second bdevsw disk (/dev/nu1), waits
+// for the iPadOS System root to be mounted, then grafts the cryptex onto a directory with
+// APFS FSIOC_GRAFT_FS (peridot_cryptex_graft, no entitlement needed). Reports the graft
+// result plus the dyld-cache path probes in one panic because there is no console.
+static void cryptexGraftThread (void *, wait_result_t)
+{
+  for (int i = 0; i < 300 && rootvnode == nullptr; i++) IOSleep (100);
+  char mountPath[128] = "";
+  PE_parse_boot_argn ("peridot-graft-mnt", mountPath, sizeof (mountPath));
+  unsigned graftType = 1, graft4cc = 0, graftFlags = 0;
+  PE_parse_boot_argn ("peridot-graft-type", &graftType, sizeof (graftType));
+  PE_parse_boot_argn ("peridot-graft-4cc", &graft4cc, sizeof (graft4cc));
+  PE_parse_boot_argn ("peridot-graft-flags", &graftFlags, sizeof (graftFlags));
+  int graftError = peridot_cryptex_graft ("/dev/nu1", mountPath[0] ? mountPath : nullptr,
+                                           graftType, graft4cc, graftFlags);
+  static const char *paths[] = {
+    "/System/Library/Caches",
+    "/System/Library/Caches/com.apple.dyld",
+    "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64",
+    "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e",
+    "/usr/lib/libSystem.B.dylib",
+    "/System/Cryptexes",
+    "/System/Cryptexes/OS",
+  };
+  char text[1500];
+  int used = snprintf (text, sizeof (text), "mnt=%s type=%u flags=%x graft=%d root=%p\n",
+                       mountPath[0] ? mountPath : "(none)", graftType, graftFlags, graftError,
+                       reinterpret_cast<void *> (rootvnode));
+  for (unsigned i = 0; i < sizeof (paths) / sizeof (paths[0]); i++) {
+    uint64_t size = 0;
+    unsigned ino = 0;
+    int err = peridot_path_probe (paths[i], &size, &ino);
+    used += snprintf (text + used, sizeof (text) - used, "%s e=%d sz=%llu ino=%u\n",
+                      paths[i], err, static_cast<unsigned long long> (size), ino);
+    if (used >= static_cast<int> (sizeof (text)) - 200) break;
+  }
+  panic ("NATIVE_UFS graft\n%s", text);
 }
 static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
 {
@@ -4029,7 +4147,7 @@ bool NativeUfs::start (IOService *provider)
     thread_deallocate (thread);
     return true;
   }
-  if (probe == 43) {
+  if (probe == 43 || probe == 44 || probe == 45) {
     // Root from the staged iPadOS System APFS container on UFS: userdata + 1 GiB,
     // 6,077,546,496 bytes, written by the host through a fastboot sparse userdata image
     // (extracted from the IPSW's 044-76040-038.dmg "OS" image). Same claim path as probes 36/39:
@@ -4054,6 +4172,27 @@ bool NativeUfs::start (IOService *provider)
     IOLog ("NATIVE_UFS os-root: lba=%llx bytes=%llx claim=1\n",
            static_cast<unsigned long long> (gBdevAbsolute >> 12),
            static_cast<unsigned long long> (kOsContainerBytes));
+    if (probe == 44) {
+      thread_t thread = nullptr;
+      if (kernel_thread_start (cryptexPathProbeThread, nullptr, &thread) != KERN_SUCCESS) {
+        panic ("NATIVE_UFS cryptex paths: cannot start the probe thread");
+      }
+      thread_deallocate (thread);
+    }
+    if (probe == 45) {
+      // The SystemOS cryptex container is staged at userdata + 8 GiB (3,303,014,400 bytes).
+      const uint64_t kCryptexOffsetBlocks = (8ULL << 30) / 4096;
+      const uint64_t kCryptexBytes = 3303014400ULL;
+      if (blocks * 4096ULL < kCryptexOffsetBlocks * 4096ULL + kCryptexBytes) {
+        panic ("NATIVE_UFS graft: userdata too small for the cryptex staging");
+      }
+      publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+      // The graft itself runs from bsd_init() (peridot-cryptex-init.patch) right before
+      // load_init_program(), because the root vnode only exists after mountroot and the
+      // graft must complete before launchd is exec'd. cryptexGraftThread is kept for a
+      // boot-arg-driven variant but is not started here.
+      (void) cryptexGraftThread;
+    }
     return true;
   }
   if (probe == 40) {
