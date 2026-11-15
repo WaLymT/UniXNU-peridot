@@ -4029,6 +4029,33 @@ bool NativeUfs::start (IOService *provider)
     thread_deallocate (thread);
     return true;
   }
+  if (probe == 43) {
+    // Root from the staged iPadOS System APFS container on UFS: userdata + 1 GiB,
+    // 6,077,546,496 bytes, written by the host through a fastboot sparse userdata image
+    // (extracted from the IPSW's 044-76040-038.dmg "OS" image). Same claim path as probes 36/39:
+    // the bdevsw disk is that container, IOFindBSDRoot adopts it, and the rd=md1 boot argument
+    // keeps APFS on its ramdisk branch.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS os-root: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS os-root: no userdata partition");
+    const uint64_t kStageOffsetBlocks = (1ULL << 30) / 4096;
+    const uint64_t kOsContainerBytes = 6077546496ULL;
+    if (blocks * 4096ULL < kStageOffsetBlocks * 4096ULL + kOsContainerBytes) {
+      panic ("NATIVE_UFS os-root: userdata too small");
+    }
+    gBdevAbsolute = (first + kStageOffsetBlocks) * 4096ULL;
+    gBdevBytes = kOsContainerBytes;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS os-root: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    IOLog ("NATIVE_UFS os-root: lba=%llx bytes=%llx claim=1\n",
+           static_cast<unsigned long long> (gBdevAbsolute >> 12),
+           static_cast<unsigned long long> (kOsContainerBytes));
+    return true;
+  }
   if (probe == 40) {
     // Install tool run: the root comes from the in-memory APFS ramdisk (startApfsMdRoot creates
     // md1), while the bdevsw disk is the 8 GiB install target (devfs /dev/nu0). The init program
