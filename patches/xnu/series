@@ -18,3 +18,4 @@ peridot-init-exec-diag.patch
 peridot-mountroot-diag.patch
 peridot-apfs-register.patch
 peridot-rd-wait.patch
+peridot-init-args.patch

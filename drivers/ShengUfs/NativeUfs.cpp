@@ -3430,6 +3430,70 @@ static void installCopyThread (void *, wait_result_t)
          (copyErrors == 0 && verifyErrors == 0) ? 1 : 0);
 }
 
+// ---- Install tool run (native-ufs-probe=40) -------------------------------------------
+// The init program is taken from the peridot-init-path boot argument (normally
+// /System/Library/Filesystems/apfs.fs/newfs_apfs, with peridot-init-arg1=/dev/nu0). This thread
+// waits for a fresh APFS container superblock on the install target and reports it, because the
+// init program has no console file descriptors.
+static void initToolVerifyThread (void *, wait_result_t)
+{
+  IOSleep (18000);
+  uint8_t *block = static_cast<uint8_t *> (IOMalloc (4096));
+  if (!block) panic ("NATIVE_UFS init: no verify buffer");
+  uint32_t found = 0, offset = 0, head = 0;
+  uint32_t readErrors = 0;
+  for (int attempt = 0; attempt < 12 && !found; attempt++) {
+    if (hostRead4k (0, gBdevAbsolute / 4096, 1, block) != kIOReturnSuccess) {
+      readErrors++;
+      IOSleep (2000);
+      continue;
+    }
+    head = (static_cast<uint32_t> (block[0]) << 24) | (static_cast<uint32_t> (block[1]) << 16) |
+           (static_cast<uint32_t> (block[2]) << 8) | static_cast<uint32_t> (block[3]);
+    for (uint32_t i = 0; i + 3 < 4096; i++) {
+      if (block[i] == 'N' && block[i + 1] == 'X' && block[i + 2] == 'S' && block[i + 3] == 'B') {
+        found = 1;
+        offset = i;
+        break;
+      }
+    }
+    if (!found) IOSleep (2000);
+  }
+  panic ("NATIVE_UFS init: found=%d off=%d head=%08x reads=%d ok=%d",
+         static_cast<int> (found), static_cast<int> (offset), head, static_cast<int> (readErrors),
+         found ? 1 : 0);
+}
+
+
+// ---- Install target verify (native-ufs-probe=41) --------------------------------------
+// Read-only check used after probe 40 ran an Apple tool (newfs_apfs) against the install
+// target: the boot image has no init override, so this probe only brings the transport up and
+// reports whether a fresh APFS container superblock is on the target.
+static void targetCheckThread (void *, wait_result_t)
+{
+  IOSleep (3000);
+  uint8_t *block = static_cast<uint8_t *> (IOMalloc (4096));
+  if (!block) panic ("NATIVE_UFS check: no buffer");
+  uint32_t found = 0, offset = 0, head = 0;
+  for (int attempt = 0; attempt < 8 && !found; attempt++) {
+    if (hostRead4k (0, gBdevAbsolute / 4096, 1, block) != kIOReturnSuccess) {
+      IOSleep (1000);
+      continue;
+    }
+    head = (static_cast<uint32_t> (block[0]) << 24) | (static_cast<uint32_t> (block[1]) << 16) |
+           (static_cast<uint32_t> (block[2]) << 8) | static_cast<uint32_t> (block[3]);
+    for (uint32_t i = 0; i + 3 < 4096; i++) {
+      if (block[i] == 'N' && block[i + 1] == 'X' && block[i + 2] == 'S' && block[i + 3] == 'B') {
+        found = 1;
+        offset = i;
+        break;
+      }
+    }
+    if (!found) IOSleep (1000);
+  }
+  panic ("NATIVE_UFS check: found=%d off=%d head=%08x ok=%d",
+         static_cast<int> (found), static_cast<int> (offset), head, found ? 1 : 0);
+}
 static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, bool report = true)
 {
   const char *why = "";
@@ -3851,6 +3915,64 @@ bool NativeUfs::start (IOService *provider)
            static_cast<unsigned long long> (lba), mediaOpened ? 1 : 0, static_cast<int> (readRc), static_cast<int> (writeRc),
            static_cast<int> (backRc), matched, static_cast<int> (restoreRc), static_cast<int> (checkRc),
            (readRc == 0 && writeRc == 0 && matched && restored) ? 1 : 0);
+  }
+  if (probe == 41) {
+    // Read-only verification of the install target (run after probe 40 formatted it).
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS check: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS check: no userdata partition");
+    const uint64_t kOffsetBlocks = (1ULL << 30) / 4096;
+    if (blocks < kOffsetBlocks + 16) panic ("NATIVE_UFS check: userdata too small");
+    gBdevAbsolute = (first + kOffsetBlocks) * 4096ULL;
+    IOLog ("NATIVE_UFS check: target lba=%llx\n", static_cast<unsigned long long> (gBdevAbsolute / 4096));
+    thread_t thread = nullptr;
+    if (kernel_thread_start (targetCheckThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS check: cannot start the check thread");
+    }
+    thread_deallocate (thread);
+    return true;
+  }
+  if (probe == 40) {
+    // Install tool run: the root comes from the in-memory APFS ramdisk (startApfsMdRoot creates
+    // md1), while the bdevsw disk is the 8 GiB install target (devfs /dev/nu0). The init program
+    // from the boot arguments (peridot-init-path, e.g. newfs_apfs) formats that target; a thread
+    // then reports whether a fresh APFS container superblock appeared.
+    if (!startApfsMdRoot ()) return false;
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS init: no userdata partition");
+    const uint64_t kOffsetBlocks = (1ULL << 30) / 4096;
+    const uint64_t kTargetBlocks = (8ULL << 30) / 4096;
+    if (blocks < kOffsetBlocks + kTargetBlocks + 16) panic ("NATIVE_UFS init: userdata too small");
+    uint64_t targetFirst = first + kOffsetBlocks;
+    if (!hostTargetOpen (targetFirst, kTargetBlocks)) panic ("NATIVE_UFS init: cannot open the target window");
+    gBdevAbsolute = targetFirst * 4096ULL;
+    gBdevBytes = kTargetBlocks * 4096ULL;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS init: no bdevsw slot");
+    uint8_t *zero = static_cast<uint8_t *> (IOMalloc (kDataMax));
+    if (!zero) panic ("NATIVE_UFS init: no wipe buffer");
+    memset (zero, 0, kDataMax);
+    int wipeErrors = 0;
+    const uint64_t wipeChunks = (1024ULL * 1024ULL) / kDataMax;
+    for (uint64_t off = 0; off < wipeChunks; off++) {
+      if (hostWrite4k (0, targetFirst + off * (kDataMax / 4096), static_cast<uint32_t> (kDataMax / 4096), zero, true) != kIOReturnSuccess) {
+        wipeErrors++;
+        break;
+      }
+    }
+    IOFree (zero, kDataMax);
+    IOLog ("NATIVE_UFS init: nu0 lba=%llx bytes=%llx wipe=%d\n",
+           static_cast<unsigned long long> (targetFirst),
+           static_cast<unsigned long long> (gBdevBytes), wipeErrors);
+    thread_t thread = nullptr;
+    if (kernel_thread_start (initToolVerifyThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS init: cannot start the verify thread");
+    }
+    thread_deallocate (thread);
+    return true;
   }
   if (probe == 39) {
     // Boot from the installed target: the bdevsw disk is the install-target window (written by

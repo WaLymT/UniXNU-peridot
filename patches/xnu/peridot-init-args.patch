@@ -1,0 +1,92 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8128,25 +8128,55 @@
+ 		scratch_addr = USER_ADDR_ALIGN(scratch_addr + init_args_length, sizeof(user_addr_t));
+ 	}
+ 
+-	if (proc_is64bit(p)) {
+-		user64_addr_t argv64bit[3] = {};
+-
+-		argv64bit[0] = argv0;
+-		argv64bit[1] = argv1;
+-		argv64bit[2] = USER_ADDR_NULL;
+-
+-		error = copyout(argv64bit, scratch_addr, sizeof(argv64bit));
++	/* peridot: extra argv entries for the init program (peridot-init-arg1..3). */
++	int peridot_extra_count = 0;
++	user_addr_t peridot_extra[3] = { USER_ADDR_NULL, USER_ADDR_NULL, USER_ADDR_NULL };
++	for (int peridot_arg = 0; peridot_arg < 3; peridot_arg++) {
++		char peridot_name[32];
++		char peridot_value[128];
++		snprintf(peridot_name, sizeof(peridot_name), "peridot-init-arg%d", peridot_arg + 1);
++		if (!PE_parse_boot_argn(peridot_name, peridot_value, sizeof(peridot_value))) {
++			break;
++		}
++		size_t peridot_length = strlen(peridot_value) + 1;
++		peridot_extra[peridot_extra_count] = scratch_addr;
++		error = copyout(peridot_value, scratch_addr, peridot_length);
+ 		if (error) {
+ 			return error;
+ 		}
++		scratch_addr = USER_ADDR_ALIGN(scratch_addr + peridot_length, sizeof(user_addr_t));
++		peridot_extra_count++;
++	}
++
++	if (proc_is64bit(p)) {
++		user64_addr_t argv64bit[5] = {};
++		int argv_index = 0;
++
++		argv64bit[argv_index++] = argv0;
++		if (argv1 != USER_ADDR_NULL) {
++			argv64bit[argv_index++] = argv1;
++		}
++		for (int peridot_arg = 0; peridot_arg < peridot_extra_count; peridot_arg++) {
++			argv64bit[argv_index++] = peridot_extra[peridot_arg];
++		}
++
++		error = copyout(argv64bit, scratch_addr, sizeof(user64_addr_t) * (argv_index + 1));
++		if (error) {
++			return error;
++		}
+ 	} else {
+-		user32_addr_t argv32bit[3] = {};
+-
+-		argv32bit[0] = (user32_addr_t)argv0;
+-		argv32bit[1] = (user32_addr_t)argv1;
+-		argv32bit[2] = USER_ADDR_NULL;
+-
+-		error = copyout(argv32bit, scratch_addr, sizeof(argv32bit));
++		user32_addr_t argv32bit[5] = {};
++		int argv_index = 0;
++
++		argv32bit[argv_index++] = (user32_addr_t)argv0;
++		if (argv1 != USER_ADDR_NULL) {
++			argv32bit[argv_index++] = (user32_addr_t)argv1;
++		}
++		for (int peridot_arg = 0; peridot_arg < peridot_extra_count; peridot_arg++) {
++			argv32bit[argv_index++] = (user32_addr_t)peridot_extra[peridot_arg];
++		}
++
++		error = copyout(argv32bit, scratch_addr, sizeof(user32_addr_t) * (argv_index + 1));
+ 		if (error) {
+ 			return error;
+ 		}
+@@ -8231,6 +8261,18 @@
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();
+ #endif /* CONFIG_MEMORYSTATUS */
++
++	/* peridot: boot-argument override of the init program (install work needs Apple tools,
++	 * and the restore ramdisk's launchd cannot be changed because the root is read-only). */
++	char peridot_init_path[128];
++	if (PE_parse_boot_argn("peridot-init-path", peridot_init_path, sizeof(peridot_init_path))) {
++		printf("load_init_program: peridot init path %s\n", peridot_init_path);
++		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, peridot_init_path, init_envp);
++		if (!error) {
++			return;
++		}
++		panic("peridot: init program %s failed, errno %d", peridot_init_path, error);
++	}
+ 
+ #if (DEBUG || DEVELOPMENT) && defined(XNU_NATIVE_AIR_INIT) && XNU_NATIVE_AIR_INIT
+ 	int offline_air = 0;
