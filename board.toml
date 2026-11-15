@@ -1,4 +1,4 @@
-# peridot (Redmi Turbo 3 / POCO F6) 闂?UniXNU device repository, format 2.
+# peridot (Redmi Turbo 3 / POCO F6) - UniXNU device repository, format 2.
 #
 # Every value below is either taken from a named source or marked TODO(verify).
 # Sources: stock DTS (dts/vendor/peridot-stock.dts), Mu-Silicium
@@ -102,34 +102,27 @@ panic_screen = false
 # before that fix.
 dram_size = "0x80000000"
 
-# power state and then only reads the controller, the SMMU and the request
-# lists, printing what firmware left behind. Nothing is written with this set.
-# native-ufs-storage selects the storage bring-up stages (bit mask, see NativeUfs.cpp):
-# 1 load IOStorageFamily, 2 add IOBlockStorageDriver, 4 add IOGUIDPartitionScheme,
-# 8 add the APFS container personalities.
-# Bring-up publication in the mode the muyu port uses: no owner policy, publish the
-# windows and let the publisher accept any media below them.
-# native-ufs-mountroot=1: run the real vfs_mountroot() on the bdevsw window once the
-# block-device ioctls answer (see NativeUfs.cpp). Off in every other profile so a
-# refused open cannot panic a bring-up boot.
-# Route 3 (2026-11-15): the root is a RAM disk instead of the APFS container.
-# rd=md0 makes bsd_init root on the Data ramdisk; mockfs turns the Mach-O at its start
-# into /sbin/launchd. The UFS driver stays off so it cannot steal rootdev.
-# Probe 18 is the APFS memory-device root: the kernel brings the UFS transport up,
-# reads the 184,549,376-byte APFS container from userdata offset 0 into wired memory,
-# registers it as md(N) and leaves it as rootdev for IOFindBSDRoot to adopt. rd=md0 is
-# gone because the root is no longer the ADT Data ramdisk; mockfs stays as the last
-# mountroot candidate.
-# peridot-apfs-vfsmount=1 makes vfs_mountroot() mount the APFS volume through a direct
-# VFS_MOUNT instead of apfs_vfsop_mountroot(), whose root-volume selection refuses this
-# role-less, snapshot-less RestoreRamDisk container (p115 saw ENOENT at
-# apfs_vfsop_mount:2479; p307 proved mockfs was taking the root instead).
-# offline-apfs-load=1 is what makes APFS reachable at all: the prelinked apfs kext does not
-# put its vfs into vfsconf during prelink, and bsd_init() runs the UniXNU load probe
-# (patches/xnu/offline-component-load-probes.patch) right after vfsinit(), which calls
-# OSKextLoadKextWithIdentifier("com.apple.filesystems.apfs") and the kext registers itself.
-# p314 proved vfsconf had only devfs/mockfs at mountroot time (seen 0), so this is the gate.
-# rd= stays absent: IOFindBSDRoot() resolves it before NativeUfs builds md1 (p309).
+# Storage bring-up and the current root path (2026-11-15; evidence in
+# peridot/notes-2026-11-15-real-root.md and peridot/HANDOFF-2026-11-15-real-root.md):
+# native-ufs-probe=18 brings the UFS transport up, reads the 184,549,376-byte APFS
+# RestoreRamDisk container from userdata offset 0 into wired memory, registers it as md1 and
+# leaves it as rootdev; then it publishes the same window as a writable IOBlockStorageDevice
+# (disk0/disk1/disk1s1). rd=md1 plus patches/xnu/peridot-rd-wait.patch make IOFindBSDRoot wait
+# for that device so APFS mounts the container through the restore/ramdisk branch of
+# container_rootmount. md0 stays occupied by the payload Data seed, so the container lands on
+# md1: the payload carries a zero seed, never an executable one (an executable seed lets
+# mockfs produce a fake root that looks like success - p343/p353).
+# offline-apfs-load=1 loads com.apple.filesystems.apfs before mountroot because the prelinked
+# kext does not register its vfs at prelink time (upstream UniXNU patch
+# UniXNU/patches/xnu/offline-component-load-probes.patch); peridot-apfs-register.patch
+# re-registers it from vfs_subr.c and moves it in front of mockfs.
+# peridot-allow-unsigned-root=1 is the bring-up opt-out of the exec/rootauth policy: the
+# RestoreRamDisk volume has no seal and its role-less container cannot pass
+# FSIOC_KERNEL_ROOTAUTH. amfi_* flags and -restore are AMFI/restore-mode switches. All of
+# these are bring-up only; see peridot/audit/2026-11-15-code-audit.md P1-7 before shipping
+# this configuration anywhere.
+# native-ufs-mountroot=1 (not used in this profile) would run vfs_mountroot() on the bdevsw
+# window once the block-device ioctls answer; probes 20/21/22 and 30-33 are diagnostics.
 kernel_args = ["-v", "native-ufs-probe=18", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1", "offline-apfs-load=1", "rd=md1", "amfi-allows-trust-cache-load=1", "amfi_allow_any_signature=1", "-restore"]
 
 [payload.adt]

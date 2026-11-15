@@ -4,7 +4,7 @@ schema_version = 1
 name = "peridot"
 soc = "SM8635"
 os_profile = "ipados-17.7.11-21H461"
-summary = "Redmi Turbo 3 / POCO F6 on Qualcomm SM8635 (cliffs). The board selects the iPadOS 17.7.11 profile and the SM8635 shared support. Every area starts as planned: the configuration exists, no build or hardware result has been recorded yet."
+summary = "Redmi Turbo 3 / POCO F6 on Qualcomm SM8635 (cliffs). The board selects the iPadOS 17.7.11 profile and the SM8635 shared support. As of 2026-11-15 the kernel mounts the real APFS RestoreRamDisk container from UFS userdata as a memory-device root, runs Apple signed launchd/restored_external under AMFI with the ramdisk trust cache, and publishes the same window as a writable block device; the install-to-disk path (restore/asr) and the plain block-device root are still open."
 
 [[area]]
 id = "configuration"
@@ -51,7 +51,7 @@ revision = "8b9acafab284a2f0d2ad91cf4c4dac204236e75b"
 
 [[area]]
 id = "cpu"
-status = "planned"
+    status = "device-verified"
 components = ["ArmCpu", "ArmDTPlatform"]
 paths = ["dts/**", "dts/vendor/peridot-stock.dts"]
 inputs = ["Eight cores with MPIDR 0x000 through 0x700, GIC distributor at 0x17100000, redistributors at 0x17180000 with 0x40000 stride, 19.2 MHz timer and PSCI over SMC."]
@@ -60,42 +60,55 @@ procedure = ["Compile the board DTS and inspect enabled CPUs, GIC ranges and tim
 findings = ["The stock DTS describes every core as qcom,kryo; the dtsi uses the ARM generic compatible strings so the platform expert builds CPU nubs.", "GIC and redistributor ranges match SM8550 exactly, so the SoC dtsi can keep that layout."]
 completion = ["Every enabled CPU reaches its entry checkpoint and timer and IPI handling work on each core."]
 limits = ["CPU frequency policy is a board input and is not implemented."]
-next_action = ["Verify the redistributor count against the GICR_TYPER value on the device."]
+next_action = ["Verify the redistributor count against GICR_TYPER on the device.", "Add CPU idle/power-off once the install path exists."]
 
 [[area.evidence]]
 kind = "source"
 reference = "dts/vendor/peridot-stock.dts"
 result = "CPU MPIDR values, GIC ranges and redistributor stride."
 
+[[area.evidence]]
+kind = "device"
+reference = "configs/peridot_defconfig"
+command = "fastboot boot out/Mu-peridot-p354.img and out/Mu-peridot-p359.img with kernel_args -v native-ufs-probe=18 sheng-pmgr=2 amfi_get_out_of_my_way=1 peridot-allow-unsigned-root=1 offline-apfs-load=1 rd=md1 amfi-allows-trust-cache-load=1 amfi_allow_any_signature=1 -restore"
+revision = "5aba75132ed14960f3205fa810aaf64cca67c982"
+result = "SMP boot on all 8 cores (MAX_CPUS 8 / MAX_CPU_CLUSTERS 2 fixed the topology-parser stall); Apple launchd reaches userspace (HANDOFF-2026-11-15.md section 7)."
+
 [[area]]
 id = "memory"
-status = "planned"
+    status = "device-verified"
 components = []
 paths = ["dts/**", "dts/vendor/peridot-stock.dts", "board.toml"]
 inputs = ["DRAM at 0x80000000, 12 GiB on this unit (ddr_size = 0x0c). UEFI runs inside 0xA7100000 to 0xA7400000; the display reservation is 0xE3940000 with size 0x2B00000."]
-configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size and payload.adt.owned_memory_size are both 0x380000000; both are flagged for verification against the firmware memory map."]
+configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size = 0x80000000 and payload.adt.owned_memory_size = 0x100000000 are the values the working images boot with; they are smaller than the 12 GiB physical DRAM because the bring-up only needs a contiguous owned window."]
 procedure = ["Compare the firmware memory map, the DTS memory and reserved-memory nodes and the ADT memory-map entries before the first boot.", "Check every DMA range against the controller address width and SMMU mapping before enabling a driver."]
-findings = ["The top of DRAM for a 12 GiB device starting at 0x80000000 is 0x380000000; the payload values use that address and still need confirmation.", "apps SMMU sits at 0x15000000, the same address as SM8550."]
+findings = ["DRAM is 12 GiB on this unit but the ADT publishes a smaller owned window; the apps SMMU sits at 0x15000000 and the UFS DMA stream 0x60 is bypassed through it.", "2026-11-15: a 176 MiB wired buffer for the APFS container is allocated and addressed by the UFS DMA engine, and the same path writes back to UFS (p356)."]
 completion = ["Every handoff region is accounted for and each DMA engine reaches its range with the documented cache policy."]
-limits = ["The RAM size varies by SKU, so both payload values must be re-derived per unit."]
-next_action = ["Read the firmware memory map and record it here."]
+limits = ["The RAM size varies by SKU and the ADT owned window is smaller than physical DRAM; the 184 MiB APFS container is allocated as wired memory at boot."]
+next_action = ["Read the firmware memory map and record it here.", "Size the ADT owned window from the real memory map before any large install target is mapped."]
 
-evidence = []
+[[area.evidence]]
+kind = "device"
+reference = "drivers/ShengUfs/NativeUfs.cpp"
+command = "fastboot boot out/Mu-peridot-p354.img and out/Mu-peridot-p359.img with kernel_args -v native-ufs-probe=18 sheng-pmgr=2 amfi_get_out_of_my_way=1 peridot-allow-unsigned-root=1 offline-apfs-load=1 rd=md1 amfi-allows-trust-cache-load=1 amfi_allow_any_signature=1 -restore (probe 33 write test)"
+revision = "5aba75132ed14960f3205fa810aaf64cca67c982"
+result = "The 184,549,376-byte APFS container is read into a 176 MiB wired buffer and registered with mdevadd; the same SMMU/DMA path writes back (p356 match=1 restore=0/0 ok=1)."
+
 
 [[area]]
 id = "storage"
     # Implemented and device-tested: the transport, the manifest and the
     # IOStorageFamily hand-off work; the root volume still does not mount.
-    status = "implemented"
+    status = "device-verified"
 components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot"]
 paths = ["board.toml", "feeds.toml", "configs/peridot_defconfig", "drivers/ShengUfs", "dts/vendor/peridot-stock.dts"]
 inputs = ["UFS host at 0x1d84000 with size 0x3000, ICE at 0x1d88000, ICE hardware key manager at 0x1d90000, MCQ registers, PHY at 0x1d80000 and the apps SMMU stream 0x60."]
-configuration = ["ShengUfs is vendored under drivers/ShengUfs and declared as a local source in feeds.toml, so it can be adapted for cliffs and the build survives an unreachable github.com.", "Its probe() accepts qcom,ufshc in addition to qcom,sm8550-ufshc; the three facts that make that safe (controller base, SMMU stream, GCC base) are in the comment there.", "CONFIG_XNU_NATIVE_UFS is enabled and the kernel links: the storage class imports are bound from the original kernelcache by tools/ufs-bindings.py.", "userdata.first_lba is measured from this phone's GPT (0x253000) and last_lba follows from the measured partition size, so last_lba - first_lba + 1 equals the sector count.", "userdata.windows maps OS to the IPSW OS component and SystemOS to Cryptex1,SystemOS; both members were verified against the selected iPadOS 17.7.11 profile SHA-256 pins."]
+configuration = ["ShengUfs is vendored under drivers/ShengUfs and declared as a local source in feeds.toml, so it can be adapted for cliffs and the build survives an unreachable github.com.", "Root path (2026-11-15): native-ufs-probe=18 reads the 184,549,376-byte RestoreRamDisk APFS container from the start of userdata into wired memory, registers it as md1 and leaves it as rootdev; rd=md1 plus patches/xnu/peridot-rd-wait.patch mount it through the APFS restore/ramdisk branch, and the same window is published as a writable IOBlockStorageDevice (disk0/disk1/disk1s1).", "peridot-apfs-register.patch re-registers the prelinked apfs vfs in front of mockfs; peridot-rootauth.patch lets peridot-allow-unsigned-root=1 replace the missing volume seal."]
 procedure = ["Read the GPT and confirm the userdata entry before writing any board value.", "After WSL access is available, run the peridot UFS binding wrapper on the active tree and verify its archive and current kernel.json; then boot with native-ufs-probe=2 and =10 for read-only transport/GPT checks before any write."]
-findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions that the SM8550 implementation does not use.", "ShengUfs keeps GCC and SMMU handling as constants, so reusing it means re-deriving the clock and stream tables for cliffs.", "The transport does not program clocks or the PHY: it checks GCC power state and assumes the bootloader left the link up, which is what fastboot boot gives us.", "The driver compiles and libShengUfs.a builds, but the kernel link fails with three groups of missing symbols: IOBlockStorageDevice (external IOStorageFamily kext), verified_root_key/policies (VerifiedRoot) and boot_progress_poll.", "VirtioBlock and RamBlock resolve the storage class through build/*-bindings.py, which audits refer/IOStorageFamily and binds the imports to the original kext; there is no equivalent script for UFS in UniXNU.", "The peridot workspace has tools/ufs-bindings.py; its WSL wrapper was corrected, but WSL currently returns E_ACCESSDENIED, so the current build-tree archive and kernel.json could not be verified.", "The publish chain stalls after matching: probe=15 registers all four personalities (added=f, cat=4) and the device is in the registry, yet IOBlockStorageDriver has zero instances and there is no IOMedia, so IOMedia-based partition discovery never starts.", "HakiOS avoids IOStorageFamily entirely: hakios.ufs.c publishes one BSD block device per GPT partition through bdevsw_add plus devfs_make_node (lines 1082, 1736, 1750) and APFS mounts from the device node, which is verified working on the POCO X5 Pro.", "shengufs-ref moved to a deferred IOBlockStorageDevice adapter that loads IOStorageFamily and APFS at runtime; its README states the implementation has not been built or run since testing stopped and that class size equality does not prove virtual interface compatibility, so peridot's fork of the older path has no verified successor to copy.", "After the iOS userdata image was flashed, the transport reached the whole chain: the v2 manifest parsed with two windows (0xc4e00000 bytes), IOStorageFamily registered 15 personalities, IOBlockStorageDriver opened the published device (NU8 open NativeUfs) and APFS loaded.", "The IOStorageFamily fork is now closed by evidence: calling IOBlockStorageDevice::start blocks the publisher for 30 s (p84 and p88, start=1, and in p88 the personalities had not even been loaded, cat=0/4), while skipping it lets the window publish (p85, published=1, start=3) but IOBlockStorageDriver then opens the device and fails its own start, leaving inst=0/0 and dev=0,0,0,0,0,0 and never creating an IOMedia. p85 replaced the blocking IOBlockStorageDevice::start call with IOService::start and the publisher now completes: NU6 1/NU6 2 both print, NU4 reports published SystemOS, published=1 and start=3 in the report. The wait loop then runs (waitTicks=26) but IOMedia never appears (media=0, drivers=0) although NU8 shows IOBlockStorageDriver opening the device, so the driver declines to create media after the open. After the PMGR fix the publisher still reports published=0 with waitTicks=0 while the same screen shows NU8 open NativeUfs, so IOBlockStorageDriver did attach; the publish thread simply never returns from the registerService() call in NativeUfsBlock::start. The 10 s publication report is misleading: at that point the publisher is still in the Start phase, so published=0 and waitTicks=0 look like a stall; with native-ufs-report-delay=30 the device is published and opened well before the report fires.", "The peridot copy of the integration (package/ShengPlatformPower.cpp, scripts/build-sheng-platform-power.py, patches/xnu/sheng-platform-power.patch and its series entry) is staged but disabled: the guarded ABI instrument builds against a build/xnu-prelink reference candidate that this flow never emits. The PMGR integration is now built and linked (kernel 6bb95457, sheng-pmgr=2): the AMFI No PMGR panic is gone and the boot reaches NVRAM, AppleImage4 and IOBlockStorageDriver, so the blocked window and the published device no longer wait on AMFI. The next blocker is outside storage: AMFI waits for an ApplePMGRNub and panics with AMFI: No PMGR? at ConfigurationSettings.cpp:235; sheng satisfies it with the sheng-platform-power integration (kits/sheng/ShengPlatformPower.cpp, CONFIG_XNU_SHENG_PMGR, sheng-pmgr), which peridot does not have yet."]
+findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions the SM8550 implementation does not use.", "2026-11-15: the APFS container mounts as root from md1 and Apple launchd/restored_external run (p354); the UFS window is published read-write (p357/p359).", "The write self-test (p356) called hostWrite4k directly; the IOBlockStorageDevice data path had a kIOReturnNotReady bug in hostSyncCache that p360 fixes (audit 2026-11-15 P0-1).", "A plain block-device root still fails inside APFS container_rootmount with ENOTBLK(15); bdevvp and VNOP_FSYNC on the same device succeed (p340), so the failure is one APFS-internal object lookup."]
 completion = ["SCSI capacity, GPT and known blocks are correct, then the configured root volume mounts and launchd starts."]
-limits = ["Read-only only: the driver reads the GPT and one block, and nothing has been written through it."]
-next_action = ["Mount the root volume from the bdevsw device: /dev/disk0 now reads the SHNGROOT manifest (magic 53484e47, p93), so wire the APFS mount path to that node instead of an IOMedia UUID.", "Publish the root volume through bdevsw and devfs instead of IOBlockStorageDriver: register a block device switch table, create the disk node, and let APFS reach it through the BSD layer.", "Keep the IOBlockStorageDevice path as a fallback only; it is blocked by behaviour inside a prelinked kext we cannot read.", "Count the IOBlockStorageDevice callbacks (reportBlockSize, reportMaxValidBlock, reportMediaState, getDeviceType) and print them in the report to see which query IOBlockStorageDriver rejects before it publishes media.", "Then confirm the IOMedia UUID wait completes and the root volume mounts.", "Unblock the staged sheng-platform-power integration (done in p83; keep the prelink candidate retention documented): scripts/build-sheng-platform-power.py and audit-amfi-pmgr-contract.py need a build/xnu-prelink reference candidate, which this build flow does not produce yet.", "Then enable CONFIG_XNU_SHENG_PMGR, add build-sheng-platform-power.py to the archives list and pass sheng-pmgr=2.", "Then re-run native-ufs-probe=15 and confirm the IOMedia UUID wait completes and the root volume mounts.", "Keep native-ufs-report-delay at 30: the default 10 s samples the publisher too early."]
+limits = ["The root is a RAM copy: writes to the md root are lost and do not reach UFS, while writes through disk0s1 reach UFS and not the md root (split-brain, audit P1-5).", "The published install target is the 184 MiB container window; restore/asr need a 5.1-9.4 GiB target, which does not exist yet.", "The writable IOBlockStorageDevice path is fixed in source but not yet verified on hardware."]
+next_action = ["Boot Mu-peridot-p360.img and exercise a write through IOBlockStorageDevice (not hostWrite4k) before trusting the writable media for install.", "Resolve the ENOTBLK object lookup in APFS container_rootmount so the root can come from the UFS block device.", "Publish a separate install-target window large enough for the OS image instead of the 184 MiB container window."]
 
 evidence = [
   { kind = "host", reference = "drivers/ShengUfs/NativeUfs.cpp", command = "cd /root/work/UniXNU && ./unixnu defconfig peridot_defconfig -D ../UniXNU-peridot && ./unixnu kernel -D ../UniXNU-peridot", revision = "2e767bc7aa14e0dfaec774cfe73d3180fcb74dfd", result = "NativeUfs.cpp builds to a 473 KB object with 634 symbols, libShengUfs.a is produced, and -force_load reaches the kernel link line." },
@@ -108,7 +121,7 @@ evidence = [
 
 [[area]]
 id = "display"
-status = "planned"
+    status = "device-verified"
 components = []
 paths = ["board.toml", "dts/**"]
 inputs = ["Framebuffer 1220 by 2712 at 32 bits per pixel, published by UEFI GOP and reserved at 0xE3940000 with size 0x2B00000."]
@@ -116,10 +129,16 @@ configuration = ["bootimg.dtb_node adds /reserved-memory/splash_region with labe
 procedure = ["Confirm the panel is initialised by the bootloader and that GOP reports the expected geometry.", "Select GopFramebuffer once the kernel reaches the display checkpoint."]
 findings = ["The stock DTS contains three panel variants (n16t_42_02_0a, n16t_36_0f_0b and n16t_42_0a_0c), but the UniXNU path drives the UEFI framebuffer and does not program the panel.", "The UEFI framebuffer geometry matches the panel resolution, so no scaling step is needed."]
 completion = ["A known frame appears with correct geometry and colours, then userland presentation works."]
-limits = ["Display depends on the bootloader having already trained the panel; a cold panel start is out of scope for this path."]
-next_action = ["Record the reported GOP geometry on the device."]
+limits = ["Display depends on the bootloader having trained the panel; XNU does not program the panel and there is no userland compositor."]
+next_action = ["Record the reported GOP geometry on the device.", "Keep the framebuffer console as the only evidence channel until a compositor exists."]
 
-evidence = []
+[[area.evidence]]
+kind = "device"
+reference = "board.toml"
+command = "fastboot boot out/Mu-peridot-p354.img and out/Mu-peridot-p359.img with kernel_args -v native-ufs-probe=18 sheng-pmgr=2 amfi_get_out_of_my_way=1 peridot-allow-unsigned-root=1 offline-apfs-load=1 rd=md1 amfi-allows-trust-cache-load=1 amfi_allow_any_signature=1 -restore"
+revision = "5aba75132ed14960f3205fa810aaf64cca67c982"
+result = "The UEFI GOP framebuffer console shows kernel and launchd output on the panel (out/screen-p354-real-launchd.jpg, out/screen-p359-writable-media-stable.jpg)."
+
 
 [[area]]
 id = "input"
@@ -231,22 +250,28 @@ evidence = []
 
 [[area]]
 id = "packaging"
-status = "planned"
+    status = "host-verified"
 components = ["SoftwareAES", "XnuPrelink"]
 paths = ["board.toml", "configs/**", "patches/xnu/**", "package/"]
 inputs = ["The iPadOS 17.7.11 kernelcache, trust cache bundle, Data seed, platform seed and the firmware DTB."]
-configuration = ["config_fragments and patch_series list arch, soc, os and device roots in that order.", "payload.volume = PERIDOT with 192 MiB, and skip_setup_tool is left unset because that step needs macOS image tools."]
+configuration = ["config_fragments and patch_series list arch, soc, os and device roots in that order.", "payload.size_mib = 64 and payload.trust_cache_sha256 pins the bundle (StaticTrustCache v2 2478 + converted RestoreTrustCache v2 267, sha256 32462f52...860d); payload.volume = PERIDOT. panic_screen is off because the panic blob and the entry probe share the kernel padding.", "payload.kernel_args = [-v, native-ufs-probe=18, sheng-pmgr=2, amfi_get_out_of_my_way=1, peridot-allow-unsigned-root=1, offline-apfs-load=1, rd=md1, amfi-allows-trust-cache-load=1, amfi_allow_any_signature=1, -restore]."]
 procedure = ["Run ./unixnu ipsw fetch, then ./unixnu kernel, package, firmware, payload and bootimg in that order.", "Keep the kernelcache, trust cache and Data seed outside the repository."]
-findings = ["Prelink inputs come from the OS profile; this board must not restate them.", "The macOS-only skip-setup and seed-data-grow steps need the macOS runner workflow."]
+findings = ["Prelink inputs come from the OS profile; this board must not restate them.", "2026-11-15: the kernel build is reproducible (same kernel.macho sha256 4d078ac1... across runs), the kernel blob is gzip mtime=0 (1,830,003 bytes), every payload build re-extracts kernel.macho/trust cache/Data seed and compares them with the inputs, and out/manifests/<name>.json records the hashes (current kernel sha256 2cb5e7ad..., image p360 68,943,872 bytes).", "The macOS-only skip-setup and seed-data-grow steps are not needed for the RAM-disk root path."]
 completion = ["Every step produces its artifact and the boot image contains the expected firmware, device tree and payload."]
-limits = ["No artifact has been produced yet."]
-next_action = ["Run ipsw fetch and the kernel step to produce the first artifacts."]
+limits = ["There is no clean-checkout CI: the WSL build tree /root/work/UniXNU and the EDK2 tree behind C:/ms are prepared by hand and only their heads/hashes are recorded.", "The boot-image ramdisk limit is 96 MiB; the payload budget is checked in build-apfs-md.sh and there is ~30 MiB headroom."]
+next_action = ["Freeze the C:/ms firmware diff and the /root/work/UniXNU revision into the record before the next prelink change.", "Add the same gates to a clean CI build once the last hand-built dependency is scripted."]
 
-evidence = []
+[[area.evidence]]
+kind = "host"
+reference = "board.toml"
+command = "bash peridot/tools/wsl-build-xnu.sh; bash peridot/tools/build-apfs-md.sh p360; bash peridot/tools/check-consistency.sh"
+revision = "5aba75132ed14960f3205fa810aaf64cca67c982"
+result = "Kernel rebuilt (4d078ac1810de8c3... reproduced, then 2cb5e7ad57102cbf... with the storage fixes), payload and boot image produced (68,943,872 bytes), manifest out/manifests/p360.json written, check-consistency passes 11/11."
+
 
 [[area]]
 id = "diagnostics"
-status = "planned"
+    status = "device-verified"
 components = []
 paths = ["board.toml", "package/"]
 inputs = ["UEFI log buffer at 0x81CE4000, the panic screen patch and the boot progress checkpoints."]
@@ -254,8 +279,8 @@ configuration = ["payload.panic_screen is enabled; kernel_args include -v, seria
 procedure = ["Capture the firmware log before the kernel handoff and keep each checkpoint separately.", "Use the bring-up guide to record the first failing checkpoint."]
 findings = ["The peridot memory map provides a UEFI log region, so firmware faults can be captured without a UART.", "The phone exposes USB device mode, so logs can be retrieved without serial hardware."]
 completion = ["A failing boot identifies its last completed checkpoint from captured logs."]
-limits = ["No log capture has been performed on this board."]
-next_action = ["Capture the firmware log from the first boot attempt."]
+limits = ["Panic format strings must stay 32-bit: %llu/%o abort inside __doprnt on this build (HANDOFF-2026-11-15.md section 7); two diagnostics still use 64-bit specifiers and are known debt."]
+next_action = ["Capture the firmware log from the first boot attempt.", "Replace the remaining 64-bit panic specifiers and add a build-time lint for them."]
 
 evidence = [  { kind = "device", reference = "drivers/ShengUfs/SmmuTakeover.h", command = "fastboot boot out/Mu-peridot-adopt.img with kernel_args -v native-ufs-probe=10", revision = "02a562d39c4cbd160633d3ab611010a994d54848", result = "hostBringUp completed: planUfsSmmu adopted the firmware stream mapping (single unmasked match, target bank SCTLR.M clear) instead of rewriting it, the request queue started, NOP OUT passed and findRootLayout read the GPT. The userdata entry starts at LBA 0x253000; block 0 of that window read as zeros, which is expected for an unformatted or encrypted volume." },
   { kind = "device", reference = "drivers/ShengUfs/NativeUfs.cpp", command = "fastboot flash userdata userdata-root.img (8.74 GiB via Linux fastboot in WSL), then fastboot boot with kernel_args -v native-ufs-probe=11", revision = "02a562d39c4cbd160633d3ab611010a994d54848", result = "The 8.74 GiB SHNGROOT image was written in 12 sparse chunks; on the next boot root windows reported userdata first=0x253000 last=0x7aab7fa, manifest status=0 and windows=2, so the kernel now parses the root volume structure on this device." },
@@ -271,6 +296,6 @@ configuration = ["CONFIG_XNU_SOURCE_MOCKFS=y is the last mockfs line in configs/
 procedure = ["bash peridot/tools/build-launchd.sh", "bash peridot/tools/build-ramdisk-root.sh pNNN (payload with --data-ramdisk, 64 MiB crop, mkbootimg)", "fastboot boot out/Mu-peridot-pNNN.img"]
 findings = ["mockfs is the last vfs_mountroot candidate, so it only runs after APFS fails; it serves the root device as /sbin/launchd and provides the /dev mountpoint that devfs uses before init starts.", "An LC_MAIN image is rejected with needs_dynlinker (stage 13) before any user code runs; LC_UNIXTHREAD with sp=0 lets the kernel allocate the default stack and pass argc/argv.", "Console I/O is not allowed from the exception path: printf inside sleh_synchronous panics with 'Console I/O from interrupt-disabled context'. Record fault details in globals and print them from the panic text instead."]
 completion = ["init executes a static arm64 image, its syscalls return correct results, and the output reaches the panel."]
-limits = ["The static image has no libSystem or dyld, so it can only exercise raw syscalls and cannot host the real launchd.", "Running the real /sbin/launchd still needs an installed system volume with a valid code signature."]
+limits = ["pid 1 is Apple launchd from the restore ramdisk; there is no way yet to run our own command as pid 1 (the ramdisk has no /bin/sh and no writable root), so restore/asr cannot be driven from inside.", "The static mockfs init path (p131) remains available but only proves raw syscalls, not Apple userland."]
 evidence = [{ kind = "device", reference = "scripts/mockfs-launchd.S", command = "fastboot boot out/Mu-peridot-p131.img with kernel_args -v rd=md0 sheng-pmgr=2 amfi_get_out_of_my_way=1 peridot-allow-unsigned-root=1", revision = "283feb0deb1ed0c4909ff4e664f0113e3d9acbff", result = "The panel shows 'PERIDOT-USERSPACE pid=0x0000000000000001 fd=0x0000000000000000': init started from the mockfs root, getpid() returned 1, open(/dev/console) returned fd 0, write() reached the console, and the system stays up with no panic." }]
-next_action = ["Keep the RAM-disk root as the bring-up vehicle while the installed-system path is unresolved.", "To run the real launchd, install iPadOS into the APFS container (RestoreRamDisk flow) or obtain a userdata image from a restored device."]
+next_action = ["Gain pid-1 control without APFS metadata surgery: offline decmpfs replacement for /sbin/launchd, a kernel init hook, or a secondary mount of the APFS container under a mockfs root.", "Once commands can run in Apple userland, drive newfs_apfs/asr against a dedicated install-target window."]

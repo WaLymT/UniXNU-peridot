@@ -1599,7 +1599,7 @@ static volatile uintptr_t gBdevNode = 0;
 static volatile uint64_t gBdevAbsolute = 0, gBdevBytes = 0;
 static unsigned gBdevIoctlCalls, gBdevIoctlSize, gBdevIoctlSetSize, gBdevIoctlCount, gBdevIoctlOther;
 static uint32_t gBdevBlockSize = 512;
-static void publishNativeBdev ();
+static void publishNativeBdev (bool claimRoot = true);
 extern "C" int vfs_mountroot (void);
 // bsd/kern/bsd_init.c: the device vfs_mountroot() hands to bdevvp(). Nothing sets it
 // on this port (setconf() never runs), so it is still major 0 when we mount.
@@ -2060,9 +2060,12 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
         return hostRead4k (0, lba, blocks, out);
       }
       IOReturn write (uint64_t lba, uint32_t blocks, const void *in) {
-        IOReturn r = hostWrite4k (0, lba, blocks, in);
-        if (r == kIOReturnSuccess) r = hostSyncCache ();
-        return r;
+        // Forced unit access: WRITE(10) with FUA puts the block on the medium before it completes,
+        // so the block-device path does not depend on SYNCHRONIZE CACHE. This is the exact write
+        // form probe 33 verified on the device (p356: match=1, restore=0/0, ok=1); the previous
+        // form wrote through hostSyncCache(), whose window gate only knew the store/log windows
+        // and made every IOBlockStorageDevice write report kIOReturnNotReady (audit P0-1).
+        return hostWrite4k (0, lba, blocks, in, true);
       }
       uint64_t gather (uint64_t offset, void *dst, uint64_t length) {
         return buffer->readBytes (offset, dst, length);
@@ -2939,7 +2942,7 @@ static void nativeBdevStrategy (struct buf *bp)
   buf_biodone (bp);
 }
 
-static void publishNativeBdev ()
+static void publishNativeBdev (bool claimRoot)
 {
   if (gBdevSlot != -2) return;
   static struct bdevsw operations = { nativeBdevOpen, nativeBdevClose, nativeBdevStrategy,
@@ -2947,19 +2950,22 @@ static void publishNativeBdev ()
   int slot = bdevsw_add (-1, &operations);
   gBdevSlot = slot;
   if (slot < 0) return;
-  // gBdevAbsolute/gBdevBytes come from the parsed layout (userdata start); do not
-  // overwrite them here or the read test sees the wrong window.
+  // gBdevAbsolute/gBdevBytes must be set by the caller before publishing: they are the window
+  // this bdevsw disk serves. publishNativeBdev() no longer guesses them (probe 18 used to hand
+  // the kernel a 0/0 device; audit 2026-11-15, P1-1).
   gBdevBounce = static_cast<uint8_t *> (IOMalloc (kDataMax));
   thread_t thread = nullptr;
   if (kernel_thread_start (bdevTestThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate (thread);
   dev_t dev = makedev (slot, 0);
-  // Publish the device number as the kernel's root before anything else: IOFindBSDRoot
-  // (peridot-bdevsw-root.patch) adopts rootdev when it is a registered bdevsw disk, so
-  // this must hold even when the mount thread is not requested.
-  rootdev = dev;
+  // Only the root-handoff paths publish this device as the kernel's root; IOFindBSDRoot
+  // (peridot-bdevsw-root.patch) adopts rootdev when it is a registered bdevsw disk. The media
+  // publication (probe 18/20) keeps the root it already has - the md ramdisk with the APFS
+  // container - instead of replacing it with this window (audit P1-1).
+  if (claimRoot) rootdev = dev;
   native_ufs_bdev_absolute = gBdevAbsolute;
   native_ufs_bdev_bytes = gBdevBytes;
   gBdevNode = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "disk0"));
+  if (!gBdevNode) IOLog ("NATIVE_UFS bdev: devfs_make_node(disk0) failed\n");
   // native-ufs-mountroot=1 runs the real mountroot once the bdevsw contract is met.
   // Off by default: bdevvp() panics when the open is refused and a panic here resets
   // the device.
@@ -3011,7 +3017,10 @@ static bool startApfsMdRoot ()
   if (le32 (memory + 0x20) != 0x4253584e) {
     panic ("NATIVE_UFS apfs-md: no NXSB at +0x20 (magic %08x)", le32 (memory + 0x20));
   }
-  if (!hostMediaOpen (first, blocks)) {
+  // Register only the container range, not the whole partition: hostInWindow() is the last
+  // guard before a WRITE(10), and handing it all ~481 GiB of userdata would let any offset error
+  // below reach the GPT, the container or another partition (audit 2026-11-15, P1-4).
+  if (!hostMediaOpen (first, kApfsMdBytes / 4096)) {
     panic ("NATIVE_UFS apfs-md: cannot open the writable media window");
   }
   dev_t device = mdevadd (-1, reinterpret_cast<uint64_t> (memory) >> 12,
@@ -3177,7 +3186,12 @@ static bool startApfsMediaRoot (IOService *host, bool rootMode, bool diagnose, b
   if (!device->start (host)) {
     panic ("NATIVE_UFS apfs-media: start failed");
   }
-  publishNativeBdev ();
+  // The bdevsw disk is this window, so give it the container geometry before publishing it.
+  gBdevAbsolute = absolute;
+  gBdevBytes = kApfsMdBytes;
+  // Only the probe 21/22 root handoff makes this disk the kernel root; probe 18 keeps the md
+  // ramdisk it just registered.
+  publishNativeBdev (rootMode);
   native_ufs_blocks_published = native_ufs_blocks_published + 1;
   IOLog ("NATIVE_UFS apfs-media: published %s\n", device->windowLabel ());
   if (rootMode) {
@@ -3536,7 +3550,7 @@ bool NativeUfs::start (IOService *provider)
     uint8_t *work = static_cast<uint8_t *> (IOMalloc (4096));
     uint8_t *back = static_cast<uint8_t *> (IOMalloc (4096));
     if (!orig || !work || !back) panic ("NATIVE_UFS writetest: no buffers");
-    bool mediaOpened = hostMediaOpen (first, blocks);
+    bool mediaOpened = hostMediaOpen (first, kApfsMdBytes / 4096);
     uint64_t lba = first + 8;
     IOReturn readRc = hostRead4k (lun, lba, 1, orig);
     memcpy (work, orig, 4096);

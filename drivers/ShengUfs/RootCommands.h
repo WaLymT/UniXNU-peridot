@@ -345,7 +345,10 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
 // SYNCHRONIZE CACHE(10) for the whole LUN: everything written so far is on the medium when this returns.
 static IOReturn hostSyncCache (void)
 {
-  if (!gHost.ready || (!gStoreOpen && !gLogOpen)) return kIOReturnNotReady;
+  // The media window is a write path too (probe 18 publishes it to the storage stack). Leaving it
+  // out of this gate made every IOBlockStorageDevice write fail with kIOReturnNotReady after the
+  // data had already reached the device (audit 2026-11-15, P0-1).
+  if (!gHost.ready || (!gStoreOpen && !gLogOpen && !gMediaOpen)) return kIOReturnNotReady;
   const bool held = hostLock ();
   uint8_t cdb[10] = { 0x35 };
   uint32_t scsi = 0;
