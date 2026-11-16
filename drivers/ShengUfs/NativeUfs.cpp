@@ -4285,9 +4285,11 @@ bool NativeUfs::start (IOService *provider)
     uint64_t stageFirst = first + kStageOffsetBlocks;
     if (!hostTargetOpen (stageFirst, kStageBlocks)) panic ("NATIVE_UFS args-dump: cannot open the staging window");
     publishThirdNativeBdev (stageFirst * 4096ULL, kStageBlocks * 4096ULL);
-    peridotDumpMountArgs = 1;
-    IOLog ("NATIVE_UFS args-dump: nu2 lba=%llx dump=1\n",
-           static_cast<unsigned long long> (stageFirst));
+    unsigned dumpMode = 0;
+    PE_parse_boot_argn ("peridot-dump-mount-args", &dumpMode, sizeof (dumpMode));
+    peridotDumpMountArgs = static_cast<int> (dumpMode);
+    IOLog ("NATIVE_UFS args-dump: nu2 lba=%llx dump=%u\n",
+           static_cast<unsigned long long> (stageFirst), dumpMode);
     return true;
   }
   if (probe == 52) {

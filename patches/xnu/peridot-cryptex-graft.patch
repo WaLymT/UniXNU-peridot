@@ -340,10 +340,11 @@
   * { int ungraftdmg(const char *mountdir, uint64_t flags); }
 --- a/bsd/vfs/kpi_vfs.c
 +++ b/bsd/vfs/kpi_vfs.c
-@@ -193,6 +193,48 @@
+@@ -193,6 +193,49 @@
  VFS_MOUNT(mount_t mp, vnode_t devvp, user_addr_t data, vfs_context_t ctx)
  {
  	int error;
++	extern int peridotDumpMountArgs;
 +	/* peridot: log the APFS mount arguments for the cryptex bring-up. The
 +	 * regular mount(2) path hands APFS a user-space argument blob; probes
 +	 * 388-391 build the same structure from kernel memory, so log what APFS
@@ -351,7 +352,7 @@
 +	if (data && mp->mnt_op->vfs_mount &&
 +	    strncmp(mp->mnt_vfsstat.f_fstypename, "apfs", 4) == 0) {
 +				extern int peridotDumpMountArgs;
-+		if (peridotDumpMountArgs) {
++		if (peridotDumpMountArgs == 1) {
 +			uint64_t peridotDump[16] = {};
 +			copyin(data, peridotDump, sizeof(peridotDump));
 +			panic("peridot mountargs dump data=%p devvp=%p "
@@ -389,3 +390,14 @@
  
  	if ((mp == dead_mountp) || (mp->mnt_op->vfs_mount == 0)) {
  		return ENOTSUP;
+@@ -206,6 +249,10 @@
+ 		}
+ 	} else {
+ 		error = (*mp->mnt_op->vfs_mount)(mp, devvp, data, ctx);
++	}
++
++	if (peridotDumpMountArgs == 2) {
++		panic("peridot mountargs result err=%d", error);
+ 	}
+ 
+ 	return error;
