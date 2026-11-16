@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -8128,25 +8128,55 @@
+@@ -8128,25 +8128,56 @@
  		scratch_addr = USER_ADDR_ALIGN(scratch_addr + init_args_length, sizeof(user_addr_t));
  	}
  
@@ -12,16 +12,17 @@
 -		argv64bit[2] = USER_ADDR_NULL;
 -
 -		error = copyout(argv64bit, scratch_addr, sizeof(argv64bit));
-+	/* peridot: extra argv entries for the init program (peridot-init-arg1..3). */
++	/* peridot: extra argv entries for the init program (peridot-init-arg1..5). */
 +	int peridot_extra_count = 0;
-+	user_addr_t peridot_extra[3] = { USER_ADDR_NULL, USER_ADDR_NULL, USER_ADDR_NULL };
-+	for (int peridot_arg = 0; peridot_arg < 3; peridot_arg++) {
++	user_addr_t peridot_extra[5] = { USER_ADDR_NULL, USER_ADDR_NULL, USER_ADDR_NULL, USER_ADDR_NULL, USER_ADDR_NULL };
++	for (int peridot_arg = 0; peridot_arg < 5; peridot_arg++) {
 +		char peridot_name[32];
 +		char peridot_value[128];
 +		snprintf(peridot_name, sizeof(peridot_name), "peridot-init-arg%d", peridot_arg + 1);
 +		if (!PE_parse_boot_argn(peridot_name, peridot_value, sizeof(peridot_value))) {
 +			break;
 +		}
++		printf("peridot init arg %d=%s\n", peridot_arg, peridot_value);
 +		size_t peridot_length = strlen(peridot_value) + 1;
 +		peridot_extra[peridot_extra_count] = scratch_addr;
 +		error = copyout(peridot_value, scratch_addr, peridot_length);
@@ -33,7 +34,7 @@
 +	}
 +
 +	if (proc_is64bit(p)) {
-+		user64_addr_t argv64bit[5] = {};
++		user64_addr_t argv64bit[7] = {};
 +		int argv_index = 0;
 +
 +		argv64bit[argv_index++] = argv0;
@@ -56,7 +57,7 @@
 -		argv32bit[2] = USER_ADDR_NULL;
 -
 -		error = copyout(argv32bit, scratch_addr, sizeof(argv32bit));
-+		user32_addr_t argv32bit[5] = {};
++		user32_addr_t argv32bit[7] = {};
 +		int argv_index = 0;
 +
 +		argv32bit[argv_index++] = (user32_addr_t)argv0;
@@ -71,7 +72,7 @@
  		if (error) {
  			return error;
  		}
-@@ -8231,6 +8261,18 @@
+@@ -8231,6 +8262,18 @@
  #if CONFIG_MEMORYSTATUS
  	(void) memorystatus_init_at_boot_snapshot();
  #endif /* CONFIG_MEMORYSTATUS */
