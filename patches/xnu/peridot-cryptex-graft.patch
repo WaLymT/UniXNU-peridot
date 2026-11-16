@@ -12,7 +12,7 @@
  #define GRAFTDMG_ENTITLEMENT  "com.apple.private.vfs.graftdmg"
  
  /*
-@@ -744,6 +749,326 @@
+@@ -744,6 +749,325 @@
  	return error;
  }
  
@@ -306,9 +306,9 @@
 +
 +/*
 + * Mount an APFS container exposed as a block device (e.g. /dev/nu1).
-+ * kernel_mount() + KERNEL_MOUNT_BASESYSTEMROOT: mount_common() treats the data
-+ * pointer as a kernel char**, resolves the device with UIO_SYSSPACE and calls
-+ * VFS_MOUNT(mp, devvp, NULL, ctx) - the no-arguments form APFS accepts.
++ * The mount arguments are built by the caller in user memory; both the plain
++ * mount() path (MACF refuses it for pid 1, p388) and this kernel_mount() path
++ * are used during bring-up (p389+).
 + */
 +int
 +peridot_apfs_mount(const char *dev_path, const char *mount_path)
@@ -316,14 +316,13 @@
 +	extern int kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
 +	    void *data, size_t datalen, int syscall_flags, uint32_t kern_flags,
 +	    vfs_context_t ctx);
-+	vfs_context_t ctx = vfs_context_current();
++	vfs_context_t ctx = vfs_context_kernel();
 +	int error;
 +
 +	if (!mount_path || !mount_path[0]) {
 +		return EINVAL;
 +	}
 +	if (!dev_path || !dev_path[0]) {
-+		/* Root-style mount: APFS gets no mount arguments at all. */
 +		return kernel_mount("apfs", NULLVP, NULLVP, mount_path, NULL, 0, MNT_RDONLY,
 +		    KERNEL_MOUNT_NOAUTH, ctx);
 +	}
@@ -332,10 +331,42 @@
 +	error = kernel_mount("apfs", NULLVP, NULLVP, mount_path, (void *)dev_name_p,
 +	    sizeof(dev_name_p), MNT_RDONLY,
 +	    KERNEL_MOUNT_NOAUTH | KERNEL_MOUNT_BASESYSTEMROOT, ctx);
-+	printf("peridot-cryptex: kernel_mount apfs dev=%s mnt=%s -> %d\n", dev_path,
++	printf("peridot-cryptex: kernel_mount apfs dev=%s mnt=%s -> %d", dev_path,
 +	    mount_path, error);
 +	return error;
 +}
  /*
   * Ungraft a cryptex disk image (via mount dir FD)
   * { int ungraftdmg(const char *mountdir, uint64_t flags); }
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -193,6 +193,29 @@
+ VFS_MOUNT(mount_t mp, vnode_t devvp, user_addr_t data, vfs_context_t ctx)
+ {
+ 	int error;
++	/* peridot: log the APFS mount arguments for the cryptex bring-up. The
++	 * regular mount(2) path hands APFS a user-space argument blob; probes
++	 * 388-391 build the same structure from kernel memory, so log what APFS
++	 * actually receives (p392). */
++	if (data && mp->mnt_op->vfs_mount &&
++	    strncmp(mp->mnt_vfsstat.f_fstypename, "apfs", 4) == 0) {
++		uint64_t peridotWords[4] = {};
++		char peridotName14[48] = {};
++		char peridotName1c[48] = {};
++		if (copyin(data, peridotWords, sizeof(peridotWords)) == 0) {
++			copyin(data + 0x14, peridotName14, sizeof(peridotName14) - 1);
++			copyin(data + 0x1c, peridotName1c, sizeof(peridotName1c) - 1);
++			printf("peridot mountargs data=%p devvp=%p w0=%llx w1=%llx w2=%llx "
++			    "w3=%llx n14=%s n1c=%s\n",
++			    (void *)(uintptr_t)data, devvp,
++			    (unsigned long long)peridotWords[0],
++			    (unsigned long long)peridotWords[1],
++			    (unsigned long long)peridotWords[2],
++			    (unsigned long long)peridotWords[3],
++			    peridotName14, peridotName1c);
++		}
++	}
++
+ 
+ 	if ((mp == dead_mountp) || (mp->mnt_op->vfs_mount == 0)) {
+ 		return ENOTSUP;

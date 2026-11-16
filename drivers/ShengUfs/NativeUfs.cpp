@@ -4195,6 +4195,25 @@ bool NativeUfs::start (IOService *provider)
     }
     return true;
   }
+  if (probe == 46) {
+    // Restore-ramdisk root (startApfsMdRoot creates md1) with the SystemOS cryptex container
+    // staged at userdata + 8 GiB published as /dev/nu1. The init program from the boot
+    // arguments (peridot-init-path, normally /apfs.fs/mount_apfs) runs with the ramdisk's full
+    // userland, so the APFS mount goes through the regular mount(2) path: the kernel logs the
+    // mount arguments it receives (peridot-cryptex-graft.patch, kpi_vfs.c) for comparison with
+    // the kernel-side attempts of probes 45/388/389/390/391.
+    if (!startApfsMdRoot ()) return false;
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS mount-args: no userdata partition");
+    const uint64_t kCryptexOffsetBlocks = (8ULL << 30) / 4096;
+    const uint64_t kCryptexBytes = 3303014400ULL;
+    if (blocks * 4096ULL < kCryptexOffsetBlocks * 4096ULL + kCryptexBytes) {
+      panic ("NATIVE_UFS mount-args: userdata too small for the cryptex staging");
+    }
+    publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    return true;
+  }
   if (probe == 40) {
     // Install tool run: the root comes from the in-memory APFS ramdisk (startApfsMdRoot creates
     // md1), while the bdevsw disk is the 8 GiB install target (devfs /dev/nu0). The init program

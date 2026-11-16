@@ -1,43 +1,128 @@
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,6 +1096,42 @@
+@@ -1096,6 +1096,127 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
 +	/* peridot: attach the SystemOS cryptex before launchd starts; it carries the dyld
-+	 * shared cache that dyld needs for /sbin/launchd (see peridot-cryptex-graft.patch). */
++	 * shared cache that dyld needs for /sbin/launchd. See notes: p388/p389/p390.
++	 * mount_common() consumes the leading device-path pointer from the data blob, so the
++	 * APFS structure starts at +0x08 of the blob: u64 flags, u16 enum, u32, name[0x100]. */
 +	{
-+		extern int peridot_apfs_mount(const char *, const char *);
 +		extern int peridot_path_probe(const char *, uint64_t *, unsigned *);
-+		extern int peridot_cryptex_graft(const char *, const char *, uint32_t, uint32_t,
-+		    uint64_t);
-+		int peridotMountNoArgs = peridot_apfs_mount(NULL, "/System/Library/Caches");
-+		int peridotMountDev = peridotMountNoArgs ? peridot_apfs_mount("/dev/nu1",
-+		    "/System/Library/Caches") : 0;
-+		int peridotGraft = peridotMountDev ? peridot_cryptex_graft("/dev/nu1",
-+		    "/System/Library/Caches", 1, 0, 6) : 0;
-+		printf("peridot-cryptex: mount noargs=%d dev=%d graft=%d\n",
-+		    peridotMountNoArgs, peridotMountDev, peridotGraft);
-+		static const char *peridotProbePaths[] = {
-+			"/System/Library/Caches/com.apple.dyld",
-+			"/System/Library/Caches/dyld_shared_cache_arm64",
-+			"/System/Library/Caches/dyld_shared_cache_arm64e",
-+			"/System/Library/Caches/System",
-+			"/System/Library/Caches/usr",
-+			"/System/Library/Caches/System/Library/Caches/com.apple.dyld",
-+			"/System/Library/Caches/usr/lib",
-+		};
-+		for (unsigned peridotI = 0;
-+		    peridotI < sizeof(peridotProbePaths) / sizeof(peridotProbePaths[0]); peridotI++) {
-+			uint64_t peridotSize = 0;
-+			unsigned peridotIno = 0;
-+			int peridotErr = peridot_path_probe(peridotProbePaths[peridotI], &peridotSize,
-+			    &peridotIno);
-+			printf("peridot-cryptex: %s e=%d sz=%llu ino=%u\n", peridotProbePaths[peridotI],
-+			    peridotErr, (unsigned long long)peridotSize, peridotIno);
++		unsigned peridotRootProbe = 0;
++		PE_parse_boot_argn("peridot-root-probe", &peridotRootProbe,
++		    sizeof(peridotRootProbe));
++		if (peridotRootProbe == 1) {
++			static const char *peridotRootPaths[] = {
++				"/sbin/launchd", "/usr/lib/dyld", "/apfs.fs",
++				"/apfs.fs/mount_apfs", "/sbin/mount_apfs",
++				"/usr/libexec/mount_apfs",
++			};
++			for (unsigned peridotR = 0;
++			    peridotR < sizeof(peridotRootPaths) / sizeof(peridotRootPaths[0]); peridotR++) {
++				uint64_t peridotRSize = 0;
++				unsigned peridotRIno = 0;
++				int peridotRErr = peridot_path_probe(peridotRootPaths[peridotR],
++				    &peridotRSize, &peridotRIno);
++				printf("peridot root: %s e=%d sz=%llu ino=%u\n", peridotRootPaths[peridotR],
++				    peridotRErr, (unsigned long long)peridotRSize, peridotRIno);
++			}
++			int peridotRootErrs[6];
++			for (unsigned peridotR2 = 0;
++			    peridotR2 < sizeof(peridotRootPaths) / sizeof(peridotRootPaths[0]); peridotR2++) {
++				uint64_t peridotS2 = 0;
++				unsigned peridotI2 = 0;
++				peridotRootErrs[peridotR2] = peridot_path_probe(
++				    peridotRootPaths[peridotR2], &peridotS2, &peridotI2);
++			}
++			panic("root ld=%d dyld=%d fs=%d mp=%d smp=%d ump=%d",
++			    peridotRootErrs[0], peridotRootErrs[1], peridotRootErrs[2],
++			    peridotRootErrs[3], peridotRootErrs[4], peridotRootErrs[5]);
 +		}
-+		panic("peridot-cryptex: mount probes done (noargs=%d dev=%d graft=%d)",
-+		    peridotMountNoArgs, peridotMountDev, peridotGraft);
++		unsigned peridotProbe = 0;
++		PE_parse_boot_argn("peridot-cryptex-probe", &peridotProbe,
++		    sizeof(peridotProbe));
++		if (peridotProbe == 2) {
++		vm_map_t peridotMap = current_map();
++		mach_vm_offset_t peridotScratch = 0;
++		mach_vm_size_t peridotPage = vm_map_page_size(peridotMap);
++		kern_return_t peridotAlloc = mach_vm_allocate_kernel(peridotMap,
++		    &peridotScratch, peridotPage, 1 /* VM_FLAGS_ANYWHERE */, 0);
++		const char *peridotDev = "/dev/nu1";
++		const char *peridotMnt = "/System/Library/Caches";
++		const char *peridotVolName = "DawnUpdate21H461.J120J121J207J208SystemCryptex";
++		int peridotV16[9];
++		int peridotName[2][2];
++		const char *peridotMounted = "(none)";
++		for (unsigned peridotI = 0; peridotI < 9; peridotI++) {
++			peridotV16[peridotI] = -1;
++		}
++		for (unsigned peridotA = 0; peridotA < 2; peridotA++) {
++			for (unsigned peridotB = 0; peridotB < 2; peridotB++) {
++				peridotName[peridotA][peridotB] = -1;
++			}
++		}
++		int peridotMountError = -1;
++		if (peridotAlloc == 0) {
++			user_addr_t peridotDevVA = peridotScratch + 0x148;
++			user_addr_t peridotMntVA = peridotDevVA + 16;
++			user_addr_t peridotBlobVA = peridotScratch + 0x200;
++			uint8_t peridotBlob[0x148];
++			copyout(peridotDev, peridotDevVA, strlen(peridotDev) + 1);
++			copyout(peridotMnt, peridotMntVA, strlen(peridotMnt) + 1);
++			for (unsigned peridotV = 0; peridotV < 9; peridotV++) {
++				memset(peridotBlob, 0, sizeof(peridotBlob));
++				*(uint64_t *)peridotBlob = peridotDevVA;
++				*(uint64_t *)(peridotBlob + 0x08) = MNT_RDONLY;
++				*(uint16_t *)(peridotBlob + 0x10) = (uint16_t)peridotV;
++				*(uint32_t *)(peridotBlob + 0x18) = 4096;
++				copyout(peridotBlob, peridotBlobVA, sizeof(peridotBlob));
++				peridotV16[peridotV] = kernel_mount("apfs", NULLVP, NULLVP, peridotMnt,
++				    (void *)(uintptr_t)peridotBlobVA, sizeof(peridotBlob), MNT_RDONLY,
++				    KERNEL_MOUNT_NOAUTH, vfs_context_kernel());
++				if (peridotV16[peridotV] == 0) {
++					peridotMounted = peridotMnt;
++					break;
++				}
++			}
++			if (peridotMounted[0] == '(') {
++				for (unsigned peridotA = 0; peridotA < 2; peridotA++) {
++					for (unsigned peridotB = 0; peridotB < 2; peridotB++) {
++						memset(peridotBlob, 0, sizeof(peridotBlob));
++						*(uint64_t *)peridotBlob = peridotDevVA;
++						*(uint64_t *)(peridotBlob + 0x08) = peridotB ? 0 : MNT_RDONLY;
++						*(uint16_t *)(peridotBlob + 0x10) = 5;
++						*(uint32_t *)(peridotBlob + 0x18) = peridotA ? 4096 : 512;
++						copyout(peridotBlob, peridotBlobVA, sizeof(peridotBlob));
++						if (peridotA) {
++							copyout(peridotVolName, peridotBlobVA + 0x1c,
++							    strlen(peridotVolName) + 1);
++						}
++						peridotName[peridotA][peridotB] = kernel_mount("apfs", NULLVP,
++						    NULLVP, peridotMnt, (void *)(uintptr_t)peridotBlobVA,
++						    sizeof(peridotBlob), MNT_RDONLY, KERNEL_MOUNT_NOAUTH,
++						    vfs_context_kernel());
++						if (peridotName[peridotA][peridotB] == 0) {
++							peridotMounted = peridotMnt;
++							peridotMountError = 0;
++							break;
++						}
++						peridotMountError = peridotName[peridotA][peridotB];
++					}
++					if (peridotMounted[0] != '(') {
++						break;
++					}
++				}
++			}
++		}
++		panic("peridot-cryptex: probe2 alloc=%d v16=%d/%d/%d/%d/%d/%d/%d/%d/%d "
++		    "nm=%d/%d/%d/%d mnt=%s err=%d", (int)peridotAlloc,
++		    peridotV16[0], peridotV16[1], peridotV16[2], peridotV16[3], peridotV16[4],
++		    peridotV16[5], peridotV16[6], peridotV16[7], peridotV16[8],
++		    peridotName[0][0], peridotName[0][1], peridotName[1][0],
++		    peridotName[1][1], peridotMounted, peridotMountError);
++		}
 +	}
 +
  	load_init_program(p);
