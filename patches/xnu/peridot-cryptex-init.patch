@@ -1,6 +1,6 @@
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,6 +1096,220 @@
+@@ -1096,6 +1096,336 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -43,6 +43,122 @@
 +		unsigned peridotProbe = 0;
 +		PE_parse_boot_argn("peridot-cryptex-probe", &peridotProbe,
 +		    sizeof(peridotProbe));
++		if (peridotProbe == 5) {
++			/* Root is the iPadOS System container (proven); mount the writable staging APFS
++			 * container (/dev/nu2, formatted by probe 49) at /System/Library/Caches, copy the
++			 * SystemOS cryptex into a regular file there and graft that file vnode onto the
++			 * staging volume root. APFS copies mount arguments from user space, so those live
++			 * in a scratch page of the init process's map (p387/p388). */
++			extern int kernel_mount(const char *, vnode_t, vnode_t, const char *, void *,
++			    size_t, int, uint32_t, vfs_context_t);
++			extern int native_ufs_read_absolute(uint64_t, uint32_t, void *);
++			extern uint64_t nativeUfsCryptexLba;
++			extern errno_t vnode_open(const char *, int, int, int, vnode_t *,
++			    vfs_context_t);
++			extern int vnode_close(vnode_t, int, vfs_context_t);
++			extern void *IOMalloc(vm_size_t);
++			extern void IOFree(void *, vm_size_t);
++			extern int peridot_path_probe(const char *, uint64_t *, unsigned *);
++			extern int peridot_cryptex_graft(const char *, const char *, uint32_t,
++			    uint32_t, uint64_t);
++			vfs_context_t peridotCtx = vfs_context_kernel();
++			const char *peridotMnt = "/System/Library/Caches";
++			const char *peridotStageDev = "/dev/nu2";
++			const char *peridotCryptexFile = "/System/Library/Caches/cryptex.img";
++			int peridotMountErr = kernel_mount("apfs", NULLVP, NULLVP, peridotMnt, NULL, 0,
++			    MNT_RDONLY, KERNEL_MOUNT_NOAUTH, peridotCtx);
++			if (peridotMountErr != 0) {
++				vm_map_t peridotMap = current_map();
++				mach_vm_offset_t peridotScratch = 0;
++				mach_vm_size_t peridotPage = vm_map_page_size(peridotMap);
++				if (mach_vm_allocate_kernel(peridotMap, &peridotScratch, peridotPage, 1, 0) == 0) {
++					user_addr_t peridotDevVA = peridotScratch + 0x148;
++					user_addr_t peridotFsVA = peridotDevVA + 16;
++					user_addr_t peridotMntVA = peridotFsVA + 8;
++					user_addr_t peridotBlobVA = peridotScratch + 0x200;
++					uint8_t peridotBlob[0x148];
++					copyout(peridotStageDev, peridotDevVA, strlen(peridotStageDev) + 1);
++					copyout("apfs", peridotFsVA, 5);
++					copyout(peridotMnt, peridotMntVA, strlen(peridotMnt) + 1);
++					/* The captured mount_apfs blob (p407) is: fspec pointer, then
++					 * u64 mount flags = 0, u16 = 1, and zeros - so try that layout first
++					 * (rw and readonly), then the other u16 values as a fallback. */
++					for (unsigned peridotV = 0; peridotV < 10 && peridotMountErr != 0;
++					    peridotV++) {
++						memset(peridotBlob, 0, sizeof(peridotBlob));
++						*(uint64_t *)peridotBlob = peridotDevVA;
++						*(uint64_t *)(peridotBlob + 0x08) = (peridotV == 1) ? MNT_RDONLY : 0;
++						*(uint16_t *)(peridotBlob + 0x10) = (peridotV <= 1) ? 1 : (uint16_t)peridotV;
++						copyout(peridotBlob, peridotBlobVA, sizeof(peridotBlob));
++						peridotMountErr = kernel_mount("apfs", NULLVP, NULLVP, peridotMnt,
++						    (void *)(uintptr_t)peridotBlobVA, sizeof(peridotBlob),
++						    (peridotV == 1) ? MNT_RDONLY : 0, KERNEL_MOUNT_NOAUTH,
++						    peridotCtx);
++					}
++				}
++			}
++			int peridotOpenErr = -1;
++			int peridotCopyErr = 0;
++			uint64_t peridotCopied = 0;
++			int peridotGraftErr = -1;
++			if (peridotMountErr == 0) {
++				vnode_t peridotFileVp = NULLVP;
++				peridotOpenErr = vnode_open(peridotCryptexFile,
++				    0x03 | 0x0200 /* FREAD|FWRITE|O_CREAT */ | 0x0400 /* O_TRUNC */, 0644,
++				    0, &peridotFileVp, peridotCtx);
++				if (peridotOpenErr == 0) {
++					const vm_size_t peridotChunk = 1ULL << 20;
++					const uint64_t peridotCryptexBytes = 3303014400ULL;
++					uint8_t *peridotBuf = (uint8_t *)IOMalloc(peridotChunk);
++					if (!peridotBuf) {
++						peridotCopyErr = ENOMEM;
++					} else {
++						while (peridotCopied < peridotCryptexBytes) {
++							uint32_t peridotWant = (uint32_t)((peridotCryptexBytes - peridotCopied) < peridotChunk
++							    ? (peridotCryptexBytes - peridotCopied) : peridotChunk);
++							uint32_t peridotBlocks = (peridotWant + 4095) / 4096;
++							if (native_ufs_read_absolute(nativeUfsCryptexLba + (peridotCopied >> 12),
++							    peridotBlocks, peridotBuf) != 0) {
++								peridotCopyErr = EIO;
++								break;
++							}
++							int peridotResid = 0;
++							int peridotWErr = vn_rdwr(1 /* UIO_WRITE */, peridotFileVp,
++							    (caddr_t)peridotBuf, (int)peridotWant, (off_t)peridotCopied,
++							    0 /* UIO_SYSSPACE */, 0,
++							    vfs_context_ucred(peridotCtx), &peridotResid,
++							    current_proc());
++							if (peridotWErr || peridotResid) {
++								peridotCopyErr = peridotWErr ? peridotWErr : EIO;
++								break;
++							}
++							peridotCopied += peridotWant;
++						}
++						IOFree(peridotBuf, peridotChunk);
++					}
++					vnode_close(peridotFileVp, 0x03, peridotCtx);
++				}
++				if (peridotOpenErr == 0 && peridotCopyErr == 0) {
++					peridotGraftErr = peridot_cryptex_graft(peridotCryptexFile,
++					    peridotMnt, 1, 0, 6);
++				}
++			}
++			uint64_t peridotGSize = 0;
++			unsigned peridotGIno = 0;
++			int peridotGE1 = peridot_path_probe("/System/Library/Caches/com.apple.dyld",
++			    &peridotGSize, &peridotGIno);
++			peridotGSize = 0;
++			int peridotGE2 = peridot_path_probe("/System/Library/Caches/System",
++			    &peridotGSize, &peridotGIno);
++			peridotGSize = 0;
++			int peridotGE3 = peridot_path_probe("/System/Library/Caches/usr/lib",
++			    &peridotGSize, &peridotGIno);
++			panic("peridot-cryptex: file-graft2 mount=%d open=%d copy=%d/%llu graft=%d e1=%d e2=%d e3=%d",
++			    peridotMountErr, peridotOpenErr, peridotCopyErr,
++			    (unsigned long long)peridotCopied, peridotGraftErr, peridotGE1,
++			    peridotGE2, peridotGE3);
++		}
++
 +		if (peridotProbe == 4) {
 +			/* Copy the staged SystemOS cryptex container (/dev/nu1 region) into a regular
 +			 * file on the writable staging volume (probe 51 roots from the APFS container

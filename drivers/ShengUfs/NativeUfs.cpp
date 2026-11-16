@@ -1604,6 +1604,13 @@ static volatile uint64_t gBdevAbsolute = 0, gBdevBytes = 0;
 // window from major(buf_device(bp)).
 static uint64_t gBdev2Absolute = 0, gBdev2Bytes = 0;
 static int gBdev2Slot = -1;
+// Third window: the writable staging APFS container at userdata + 12 GiB (probe 52 + probe=5).
+static uint64_t gBdev3Absolute = 0, gBdev3Bytes = 0;
+static int gBdev3Slot = -1;
+extern "C" uint64_t nativeUfsStageLba = 0;
+// Set by probe 53: the VFS_MOUNT hook dumps the APFS mount arguments it receives and panics,
+// so the exact mount_apfs argument blob for the staging volume can be captured on screen.
+extern "C" int peridotDumpMountArgs = 0;
 static unsigned gBdevIoctlCalls, gBdevIoctlSize, gBdevIoctlSetSize, gBdevIoctlCount, gBdevIoctlOther;
 static uint32_t gBdevBlockSize = 512;
 static void publishNativeBdev (bool claimRoot = true);
@@ -2855,7 +2862,9 @@ static int nativeBdevClose (dev_t, int, int, struct proc *) { return 0; }
 static int nativeBdevIoctl (dev_t dev, u_long command, caddr_t data, int, struct proc *)
 {
   if (!data) return EINVAL;
-  const uint64_t bytes = (gBdev2Slot >= 0 && major (dev) == gBdev2Slot) ? gBdev2Bytes : gBdevBytes;
+  const int ioctlSlot = major (dev);
+  const uint64_t bytes = (gBdev2Slot >= 0 && ioctlSlot == gBdev2Slot) ? gBdev2Bytes
+      : ((gBdev3Slot >= 0 && ioctlSlot == gBdev3Slot) ? gBdev3Bytes : gBdevBytes);
   gBdevIoctlCalls++;
   // Diagnostic for the newfs_apfs run (probe 40): which ioctls the Apple tool uses on /dev/nu0.
   if (gBdevIoctlLog < 40) {
@@ -3072,6 +3081,31 @@ static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
          static_cast<unsigned long long> (bytes));
 }
 
+// Third bdevsw disk: the writable staging APFS container formatted by probe 49.
+static void publishThirdNativeBdev (uint64_t absolute, uint64_t bytes)
+{
+  if (gBdev3Slot != -1) return;
+  if (!gBdevBounce) gBdevBounce = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  if (!gBdevLock) gBdevLock = IOLockAlloc ();
+  if (!gBdevBounce) panic ("NATIVE_UFS staging: no bounce buffer for nu2");
+  static struct bdevsw operations3 = { nativeBdevOpen, nativeBdevClose, nativeBdevStrategy,
+                                       nativeBdevIoctl, enodev, nativeBdevPsize, D_DISK };
+  int slot = bdevsw_add (-1, &operations3);
+  if (slot < 0) {
+    panic ("NATIVE_UFS staging: third bdevsw slot failed");
+  }
+  gBdev3Slot = slot;
+  gBdev3Absolute = absolute;
+  gBdev3Bytes = bytes;
+  nativeUfsStageLba = absolute >> 12;
+  dev_t dev = makedev (slot, 0);
+  uintptr_t node = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "nu2"));
+  if (!node) IOLog ("NATIVE_UFS staging: devfs_make_node(nu2) failed\n");
+  IOLog ("NATIVE_UFS staging: nu2 slot=%d lba=%llx bytes=%llx\n", slot,
+         static_cast<unsigned long long> (absolute >> 12),
+         static_cast<unsigned long long> (bytes));
+}
+
 static void nativeBdevStrategy (struct buf *bp)
 {
   const uint64_t block = buf_blkno (bp);
@@ -3079,8 +3113,9 @@ static void nativeBdevStrategy (struct buf *bp)
   const bool writing = (buf_flags (bp) & B_READ) == 0;
   const int slot = major (buf_device (bp));
   const bool second = (gBdev2Slot >= 0 && slot == gBdev2Slot);
-  const uint64_t absolute = second ? gBdev2Absolute : gBdevAbsolute;
-  const uint64_t bytes = second ? gBdev2Bytes : gBdevBytes;
+  const bool third = (gBdev3Slot >= 0 && slot == gBdev3Slot);
+  const uint64_t absolute = third ? gBdev3Absolute : (second ? gBdev2Absolute : gBdevAbsolute);
+  const uint64_t bytes = third ? gBdev3Bytes : (second ? gBdev2Bytes : gBdevBytes);
   int error = 0;
 
   // The page cache hands a strategy routine a B_PAGEIO buffer whose data area is a UPL, not a
@@ -4233,6 +4268,60 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS mount-args: userdata too small for the cryptex staging");
     }
     publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    return true;
+  }
+  if (probe == 53) {
+    // Restore ramdisk root (has /System/Library/Filesystems/apfs.fs/mount_apfs) with the writable
+    // staging container formatted by probe 49 published as /dev/nu2. The init override runs
+    // mount_apfs /dev/nu2 /usr; the VFS_MOUNT hook dumps the argument blob and panics, capturing
+    // exactly what APFS expects for an ordinary (non-sealed) volume mount.
+    if (!startApfsMdRoot ()) return false;
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS args-dump: no userdata partition");
+    const uint64_t kStageOffsetBlocks = (12ULL << 30) / 4096;
+    const uint64_t kStageBlocks = (8ULL << 30) / 4096;
+    if (blocks < kStageOffsetBlocks + kStageBlocks + 16) panic ("NATIVE_UFS args-dump: userdata too small");
+    uint64_t stageFirst = first + kStageOffsetBlocks;
+    if (!hostTargetOpen (stageFirst, kStageBlocks)) panic ("NATIVE_UFS args-dump: cannot open the staging window");
+    publishThirdNativeBdev (stageFirst * 4096ULL, kStageBlocks * 4096ULL);
+    peridotDumpMountArgs = 1;
+    IOLog ("NATIVE_UFS args-dump: nu2 lba=%llx dump=1\n",
+           static_cast<unsigned long long> (stageFirst));
+    return true;
+  }
+  if (probe == 52) {
+    // Three windows: root = the staged iPadOS System container (proven mountroot), /dev/nu1 =
+    // the SystemOS cryptex container, /dev/nu2 = the writable staging APFS container formatted by
+    // probe 49 at userdata + 12 GiB. The cryptex-init probe=5 mounts the staging container as a
+    // secondary filesystem on the iPadOS root, copies the cryptex image into a regular file there
+    // and grafts that file vnode (p400: block-device vnode panics inside APFS).
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS file-graft2: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS file-graft2: no userdata partition");
+    const uint64_t kOsOffsetBlocks = (1ULL << 30) / 4096;
+    const uint64_t kOsContainerBytes = 6077546496ULL;
+    const uint64_t kCryptexOffsetBlocks = (8ULL << 30) / 4096;
+    const uint64_t kCryptexBytes = 3303014400ULL;
+    const uint64_t kStageOffsetBlocks = (12ULL << 30) / 4096;
+    const uint64_t kStageBlocks = (8ULL << 30) / 4096;
+    if (blocks * 4096ULL < kStageOffsetBlocks * 4096ULL + kStageBlocks * 4096ULL) panic ("NATIVE_UFS file-graft2: userdata too small");
+    gBdevAbsolute = (first + kOsOffsetBlocks) * 4096ULL;
+    gBdevBytes = kOsContainerBytes;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS file-graft2: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    uint64_t stageFirst = first + kStageOffsetBlocks;
+    if (!hostTargetOpen (stageFirst, kStageBlocks)) panic ("NATIVE_UFS file-graft2: cannot open the staging window");
+    publishThirdNativeBdev (stageFirst * 4096ULL, kStageBlocks * 4096ULL);
+    IOLog ("NATIVE_UFS file-graft2: os lba=%llx cryptex lba=%llx stage lba=%llx\n",
+           static_cast<unsigned long long> (gBdevAbsolute >> 12),
+           static_cast<unsigned long long> (nativeUfsCryptexLba),
+           static_cast<unsigned long long> (nativeUfsStageLba));
     return true;
   }
   if (probe == 51) {

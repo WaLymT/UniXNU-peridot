@@ -340,7 +340,7 @@
   * { int ungraftdmg(const char *mountdir, uint64_t flags); }
 --- a/bsd/vfs/kpi_vfs.c
 +++ b/bsd/vfs/kpi_vfs.c
-@@ -193,6 +193,29 @@
+@@ -193,6 +193,48 @@
  VFS_MOUNT(mount_t mp, vnode_t devvp, user_addr_t data, vfs_context_t ctx)
  {
  	int error;
@@ -350,7 +350,26 @@
 +	 * actually receives (p392). */
 +	if (data && mp->mnt_op->vfs_mount &&
 +	    strncmp(mp->mnt_vfsstat.f_fstypename, "apfs", 4) == 0) {
-+		uint64_t peridotWords[4] = {};
++				extern int peridotDumpMountArgs;
++		if (peridotDumpMountArgs) {
++			uint64_t peridotDump[16] = {};
++			copyin(data, peridotDump, sizeof(peridotDump));
++			panic("peridot mountargs dump data=%p devvp=%p "
++			    "w0=%llx w1=%llx w2=%llx w3=%llx w4=%llx w5=%llx "
++			    "w6=%llx w7=%llx w8=%llx w9=%llx",
++			    (void *)(uintptr_t)data, devvp,
++			    (unsigned long long)peridotDump[0],
++			    (unsigned long long)peridotDump[1],
++			    (unsigned long long)peridotDump[2],
++			    (unsigned long long)peridotDump[3],
++			    (unsigned long long)peridotDump[4],
++			    (unsigned long long)peridotDump[5],
++			    (unsigned long long)peridotDump[6],
++			    (unsigned long long)peridotDump[7],
++			    (unsigned long long)peridotDump[8],
++			    (unsigned long long)peridotDump[9]);
++		}
++uint64_t peridotWords[4] = {};
 +		char peridotName14[48] = {};
 +		char peridotName1c[48] = {};
 +		if (copyin(data, peridotWords, sizeof(peridotWords)) == 0) {
