@@ -3041,6 +3041,10 @@ static void nativeBdevStrategy (struct buf *);
 static int nativeBdevIoctl (dev_t, u_long, caddr_t, int, struct proc *);
 static int nativeBdevPsize (dev_t);
 
+// Absolute LBA of the staged SystemOS cryptex container; read by the kernel-side graft test
+// (peridot-cryptex-init.patch, peridot-cryptex-probe=4) to copy the image into a regular file.
+extern "C" uint64_t nativeUfsCryptexLba = 0;
+
 static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
 {
   if (gBdev2Slot != -1) return;
@@ -3059,6 +3063,7 @@ static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
   gBdev2Slot = slot;
   gBdev2Absolute = absolute;
   gBdev2Bytes = bytes;
+  nativeUfsCryptexLba = absolute >> 12;
   dev_t dev = makedev (slot, 0);
   uintptr_t node = reinterpret_cast<uintptr_t> (devfs_make_node (dev, DEVFS_BLOCK, 0, 0, 0644, "nu1"));
   if (!node) IOLog ("NATIVE_UFS graft: devfs_make_node(nu1) failed\n");
@@ -3361,6 +3366,16 @@ extern "C" {
 // <sys/mount.h> provides vfs_name()/vfs_statfs(); vnode_mount is kernel-internal.
 extern struct vnode *rootvnode;
 extern struct mount *vnode_mount (struct vnode *);
+// Absolute LBA of the staged SystemOS cryptex container, exported for the kernel-side
+// cryptex graft helper (probe 51 copies it into a regular file on the writable staging volume).
+// Absolute read helper for kernel code that has no IOKit instance (the cryptex graft test in
+// peridot-cryptex-init.patch copies the staged container into a regular file this way).
+extern "C" int native_ufs_read_absolute (uint64_t lba, uint32_t blocks, void *data)
+{
+  if (!data || !blocks) return EINVAL;
+  return hostRead4k (0, lba, blocks, static_cast<uint8_t *> (data)) == kIOReturnSuccess ? 0 : EIO;
+}
+
 // peridot-cryptex-graft.patch: namei + vn_stat of an absolute path on the current root,
 // and the kernel-side APFS cryptex graft (FSIOC_GRAFT_FS) without the graftdmg entitlement.
 int peridot_path_probe (const char *path, uint64_t *outSize, unsigned *outIno);
@@ -4218,6 +4233,77 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS mount-args: userdata too small for the cryptex staging");
     }
     publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    return true;
+  }
+  if (probe == 51) {
+    // Writable staging round: root is the empty 8 GiB APFS container formatted by probe 49 at
+    // userdata + 12 GiB, and the SystemOS cryptex container is published as /dev/nu1. The
+    // cryptex-init patch (peridot-cryptex-probe=4) copies the cryptex image into a regular file
+    // on that writable volume and calls peridot_cryptex_graft() with a file vnode, which is what
+    // the real graft flow passes (p400: block-device vnode panics inside APFS).
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS file-graft: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS file-graft: no userdata partition");
+    const uint64_t kStageOffsetBlocks = (12ULL << 30) / 4096;
+    const uint64_t kStageBlocks = (8ULL << 30) / 4096;
+    const uint64_t kCryptexOffsetBlocks = (8ULL << 30) / 4096;
+    const uint64_t kCryptexBytes = 3303014400ULL;
+    if (blocks < kStageOffsetBlocks + kStageBlocks + 16) panic ("NATIVE_UFS file-graft: userdata too small");
+    if (blocks * 4096ULL < kCryptexOffsetBlocks * 4096ULL + kCryptexBytes) panic ("NATIVE_UFS file-graft: cryptex region too large");
+    uint64_t stageFirst = first + kStageOffsetBlocks;
+    if (!hostTargetOpen (stageFirst, kStageBlocks)) panic ("NATIVE_UFS file-graft: cannot open the staging window");
+    gBdevAbsolute = stageFirst * 4096ULL;
+    gBdevBytes = kStageBlocks * 4096ULL;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS file-graft: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    IOLog ("NATIVE_UFS file-graft: root lba=%llx cryptex lba=%llx\n",
+           static_cast<unsigned long long> (stageFirst),
+           static_cast<unsigned long long> (nativeUfsCryptexLba));
+    return true;
+  }
+  if (probe == 49) {
+    // Writable-volume staging: format a fresh 8 GiB APFS container at userdata + 12 GiB with the
+    // restore ramdisk's newfs_apfs (init override), so a later boot can put the SystemOS cryptex
+    // image into a regular file on a writable volume and call the graft ioctl with a file vnode
+    // (p400 proved APFS graft crashes with a block-device vnode).
+    if (!startApfsMdRoot ()) return false;
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS staging: no userdata partition");
+    const uint64_t kOffsetBlocks = (12ULL << 30) / 4096;
+    const uint64_t kTargetBlocks = (8ULL << 30) / 4096;
+    if (blocks < kOffsetBlocks + kTargetBlocks + 16) panic ("NATIVE_UFS staging: userdata too small");
+    uint64_t targetFirst = first + kOffsetBlocks;
+    if (!hostTargetOpen (targetFirst, kTargetBlocks)) panic ("NATIVE_UFS staging: cannot open the target window");
+    gBdevAbsolute = targetFirst * 4096ULL;
+    gBdevBytes = kTargetBlocks * 4096ULL;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS staging: no bdevsw slot");
+    uint8_t *zero = static_cast<uint8_t *> (IOMalloc (kDataMax));
+    if (!zero) panic ("NATIVE_UFS staging: no wipe buffer");
+    memset (zero, 0, kDataMax);
+    int wipeErrors = 0;
+    const uint64_t wipeChunks = (1024ULL * 1024ULL) / kDataMax;
+    for (uint64_t off = 0; off < wipeChunks; off++) {
+      if (hostWrite4k (0, targetFirst + off * (kDataMax / 4096), static_cast<uint32_t> (kDataMax / 4096), zero, true) != kIOReturnSuccess) {
+        wipeErrors++;
+        break;
+      }
+    }
+    IOFree (zero, kDataMax);
+    IOLog ("NATIVE_UFS staging: nu0 lba=%llx bytes=%llx wipe=%d\n",
+           static_cast<unsigned long long> (targetFirst),
+           static_cast<unsigned long long> (gBdevBytes), wipeErrors);
+    thread_t thread = nullptr;
+    if (kernel_thread_start (initToolVerifyThread, nullptr, &thread) != KERN_SUCCESS) {
+      panic ("NATIVE_UFS staging: cannot start the verify thread");
+    }
+    thread_deallocate (thread);
     return true;
   }
   if (probe == 40) {
