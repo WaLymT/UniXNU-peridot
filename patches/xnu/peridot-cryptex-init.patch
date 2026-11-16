@@ -1,6 +1,6 @@
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,6 +1096,127 @@
+@@ -1096,6 +1096,150 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -43,7 +43,7 @@
 +		unsigned peridotProbe = 0;
 +		PE_parse_boot_argn("peridot-cryptex-probe", &peridotProbe,
 +		    sizeof(peridotProbe));
-+		if (peridotProbe == 2) {
++		if (peridotProbe == 2 || peridotProbe == 3) {
 +		vm_map_t peridotMap = current_map();
 +		mach_vm_offset_t peridotScratch = 0;
 +		mach_vm_size_t peridotPage = vm_map_page_size(peridotMap);
@@ -64,7 +64,7 @@
 +			}
 +		}
 +		int peridotMountError = -1;
-+		if (peridotAlloc == 0) {
++		if (peridotAlloc == 0 && peridotProbe == 2) {
 +			user_addr_t peridotDevVA = peridotScratch + 0x148;
 +			user_addr_t peridotMntVA = peridotDevVA + 16;
 +			user_addr_t peridotBlobVA = peridotScratch + 0x200;
@@ -116,12 +116,35 @@
 +				}
 +			}
 +		}
-+		panic("peridot-cryptex: probe2 alloc=%d v16=%d/%d/%d/%d/%d/%d/%d/%d/%d "
-+		    "nm=%d/%d/%d/%d mnt=%s err=%d", (int)peridotAlloc,
-+		    peridotV16[0], peridotV16[1], peridotV16[2], peridotV16[3], peridotV16[4],
-+		    peridotV16[5], peridotV16[6], peridotV16[7], peridotV16[8],
-+		    peridotName[0][0], peridotName[0][1], peridotName[1][0],
-+		    peridotName[1][1], peridotMounted, peridotMountError);
++		char peridotGraftMnt[128] = "";
++		unsigned peridotGraftType = 1, peridotGraft4cc = 0, peridotGraftFlags = 0;
++		PE_parse_boot_argn("peridot-graft-mnt", peridotGraftMnt, sizeof(peridotGraftMnt));
++		PE_parse_boot_argn("peridot-graft-type", &peridotGraftType, sizeof(peridotGraftType));
++		PE_parse_boot_argn("peridot-graft-4cc", &peridotGraft4cc, sizeof(peridotGraft4cc));
++		PE_parse_boot_argn("peridot-graft-flags", &peridotGraftFlags, sizeof(peridotGraftFlags));
++		extern int peridot_cryptex_graft(const char *, const char *, uint32_t, uint32_t,
++		    uint64_t);
++		int peridotGraftErr = peridot_cryptex_graft("/dev/nu1",
++		    peridotGraftMnt[0] ? peridotGraftMnt : NULL, peridotGraftType,
++		    peridotGraft4cc, peridotGraftFlags);
++		uint64_t peridotGSize = 0;
++		unsigned peridotGIno = 0;
++		int peridotE1 = peridot_path_probe(
++		    "/System/Library/Caches/com.apple.dyld", &peridotGSize, &peridotGIno);
++		peridotGSize = 0;
++		int peridotE2 = peridot_path_probe(
++		    "/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e",
++		    &peridotGSize, &peridotGIno);
++		peridotGSize = 0;
++		int peridotE3 = peridot_path_probe("/System/Cryptexes/OS", &peridotGSize,
++		    &peridotGIno);
++		peridotGSize = 0;
++		int peridotE4 = peridot_path_probe("/usr/lib/libSystem.B.dylib", &peridotGSize,
++		    &peridotGIno);
++		panic("peridot-cryptex: probe2 alloc=%d mount=%d graft=%d mnt=%s dl=%d/%llu "
++		    "e1=%d e2=%d e3=%d e4=%d", (int)peridotAlloc, peridotMountError,
++		    peridotGraftErr, peridotGraftMnt, peridotE1,
++		    (unsigned long long)peridotGSize, peridotE2, peridotE3, peridotE4);
 +		}
 +	}
 +

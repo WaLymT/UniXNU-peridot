@@ -3044,6 +3044,12 @@ static int nativeBdevPsize (dev_t);
 static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
 {
   if (gBdev2Slot != -1) return;
+  // publishNativeBdev() allocates the shared bounce buffer and the strategy lock; the
+  // second disk can be published on its own (probe 46 has no nu0), so set them up here
+  // too or every strategy call fails with EINVAL ("invalid bounce=0", p396).
+  if (!gBdevBounce) gBdevBounce = static_cast<uint8_t *> (IOMalloc (kDataMax));
+  if (!gBdevLock) gBdevLock = IOLockAlloc ();
+  if (!gBdevBounce) panic ("NATIVE_UFS graft: no bounce buffer for nu1");
   static struct bdevsw operations2 = { nativeBdevOpen, nativeBdevClose, nativeBdevStrategy,
                                        nativeBdevIoctl, enodev, nativeBdevPsize, D_DISK };
   int slot = bdevsw_add (-1, &operations2);
