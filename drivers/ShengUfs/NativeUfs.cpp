@@ -3054,6 +3054,40 @@ static int nativeBdevPsize (dev_t);
 // (peridot-cryptex-init.patch, peridot-cryptex-probe=4) to copy the image into a regular file.
 extern "C" uint64_t nativeUfsCryptexLba = 0;
 
+// SHNGROOT userdata manifest: the official install flow puts a 4 KiB manifest at the start of the
+// userdata partition and the unchanged IPSW disk images behind it (first window at +1 MiB). See
+// UniXNU docs/concepts/userdata.md; built with "./unixnu build userdata --ipsw <ipsw>".
+struct ShnRootWindow {
+  uint64_t offset;
+  uint64_t size;
+  uint32_t blockSize;
+  uint32_t flags;
+};
+
+static bool shngrootFind (uint64_t partFirstLba, const char *name, ShnRootWindow *window)
+{
+  if (!name || !window) return false;
+  uint8_t *header = static_cast<uint8_t *> (IOMalloc (4096));
+  if (!header) return false;
+  bool found = false;
+  if (hostRead4k (0, partFirstLba, 1, header) == kIOReturnSuccess &&
+      memcmp (header, "SHNGROOT", 8) == 0 && le32 (header + 8) == 1) {
+    const uint32_t count = le32 (header + 12);
+    for (uint32_t i = 0; i < count && i < 8 && !found; i++) {
+      const uint8_t *entry = header + 24 + static_cast<uint64_t> (i) * 128;
+      if (strncmp (reinterpret_cast<const char *> (entry), name, 31) == 0) {
+        window->offset = le64 (entry + 32);
+        window->size = le64 (entry + 40);
+        window->blockSize = le32 (entry + 48);
+        window->flags = le32 (entry + 52);
+        found = true;
+      }
+    }
+  }
+  IOFree (header, 4096);
+  return found;
+}
+
 static void publishSecondNativeBdev (uint64_t absolute, uint64_t bytes)
 {
   if (gBdev2Slot != -1) return;
@@ -4268,6 +4302,41 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS mount-args: userdata too small for the cryptex staging");
     }
     publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    return true;
+  }
+  if (probe == 55) {
+    // SHNGROOT userdata install image: manifest at the partition start, OS window (whole-disk GPT
+    // image of the OS dmg) and SystemOS window (raw cryptex container) byte for byte from the IPSW.
+    // The OS window is a disk image with a single Apple_APFS partition, so skipLeadingApfsGpt()
+    // moves the bdevsw window onto the container; the SystemOS window is the raw container and is
+    // published as /dev/nu1 for the cryptex probes.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS shngroot: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS shngroot: no userdata partition");
+    ShnRootWindow os = {}, sysos = {};
+    if (!shngrootFind (first, "OS", &os)) panic ("NATIVE_UFS shngroot: no OS window in the manifest");
+    if (!shngrootFind (first, "SystemOS", &sysos)) panic ("NATIVE_UFS shngroot: no SystemOS window in the manifest");
+    if (os.size == 0 || sysos.size == 0) panic ("NATIVE_UFS shngroot: empty window");
+    if (blocks * 4096ULL < os.offset + os.size) panic ("NATIVE_UFS shngroot: OS window outside userdata");
+    if (blocks * 4096ULL < sysos.offset + sysos.size) panic ("NATIVE_UFS shngroot: SystemOS window outside userdata");
+    uint64_t absolute = first * 4096ULL + os.offset;
+    uint64_t bytes = os.size;
+    skipLeadingApfsGpt (&absolute, &bytes);
+    gBdevAbsolute = absolute;
+    gBdevBytes = bytes;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS shngroot: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    publishSecondNativeBdev (first * 4096ULL + sysos.offset, sysos.size);
+    IOLog ("NATIVE_UFS shngroot: os off=%llx sz=%llx bd=%llx sysos off=%llx sz=%llx\n",
+           static_cast<unsigned long long> (os.offset),
+           static_cast<unsigned long long> (os.size),
+           static_cast<unsigned long long> (gBdevBytes),
+           static_cast<unsigned long long> (sysos.offset),
+           static_cast<unsigned long long> (sysos.size));
     return true;
   }
   if (probe == 53) {

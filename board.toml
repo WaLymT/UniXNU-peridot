@@ -136,10 +136,12 @@ owned_memory_size = "0x100000000"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
 packed_data_ramdisk = false
-# The volume UUID of the APFS container this board now roots from: the RestoreRamDisk of
-# iPadOS 17.7.11 21H461 (restore-ramdisk.img), read with libfsapfs. The previous value was
-# the Data update volume copied from the sheng board.
-root_match_volume_uuid = "9071148B-B025-402D-AD7A-48464D8B5FFF"
+# The APFS volume UUID the SHNGROOT userdata install flow roots from: the OS window of the
+# iPadOS 17.7.11 21H461 OS image (OS.dmg), not the RestoreRamDisk. The value is the
+# os_volume_uuid of profiles/os/ipados-17.7.11-21H461/profile.toml. The previous value,
+# 9071148B-B025-402D-AD7A-48464D8B5FFF, was the RestoreRamDisk container used by the ad-hoc
+# bring-up probes (native-ufs-probe 18/40/45) and is kept in the notes for reference.
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 unique_chip_id = "required"
 
 # Persistent panic log: pexpert check_for_panic_log() maps /pram and keeps the last panic
