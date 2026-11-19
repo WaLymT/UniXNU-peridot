@@ -211,11 +211,11 @@
 +};
 +
 +
-+/* namei + vn_stat of an absolute path on the current root. */
++/* namei + vn_stat of an absolute path on the kernel root. */
 +int
 +peridot_path_probe(const char *path, uint64_t *out_size, unsigned *out_ino)
 +{
-+	vfs_context_t ctx = vfs_context_current();
++	vfs_context_t ctx = vfs_context_kernel();
 +	struct nameidata nd = {};
 +	vnode_t vp = NULLVP;
 +	struct stat64 sb = {};

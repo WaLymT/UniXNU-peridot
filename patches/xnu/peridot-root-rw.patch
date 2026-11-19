@@ -1,0 +1,16 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1265,6 +1265,13 @@
+ 		}
+ 
+ 		if (!error) {
++			int peridotRootRw = 0;
++			extern int PE_parse_boot_argn(const char *, void *, int);
++			PE_parse_boot_argn("peridot-root-rw", &peridotRootRw, sizeof(peridotRootRw));
++			if (peridotRootRw) {
++				mp->mnt_flag &= ~MNT_RDONLY;
++				printf("peridot-mountroot: root rw requested\n");
++			}
+ 			if (bdevvp_rootvp != rootvp) {
+ 				/*
+ 				 * rootvp changed...

@@ -1,0 +1,18 @@
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2630,6 +2630,15 @@
+ #define PREBOOT_CRYPTEX_PATH "/private/preboot/Cryptexes"
+ #endif
+ 			error = vnode_lookup(PREBOOT_CRYPTEX_PATH, 0, &preboot_vp, vfs_context_current());
++			/* peridot: a cryptex mounted as its own volume on a directory inside
++			 * Preboot/Cryptexes is accepted like a graft into the Preboot volume. */
++			if (error == 0 && srfmp->vp->v_mount != preboot_vp->v_mount &&
++			    srfmp->vp->v_mount != NULL && srfmp->vp->v_mount->mnt_vnodecovered != NULLVP &&
++			    srfmp->vp->v_mount->mnt_vnodecovered->v_mount == preboot_vp->v_mount &&
++			    srfmp->vp->v_mount->mnt_vnodecovered->v_parent == preboot_vp) {
++				(void)vnode_put(preboot_vp);
++				preboot_vp = NULL;
++			}
+ 			if ((error || srfmp->vp->v_mount != preboot_vp->v_mount)
+ #if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+ 			    && !owner_carrier

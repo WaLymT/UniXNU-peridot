@@ -1,0 +1,135 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -330,8 +330,17 @@
+ 	}
+ 
+ 	kern_flags |= KERNEL_MOUNT_KMOUNT;
++	int peridotMD = 0;
++		PE_parse_boot_argn("peridot-mount-debug", &peridotMD, sizeof(peridotMD));
++		if (peridotMD) {
++			printf("pm: kernel_mount fs=%s path=%s data=%p flags=%x kern=%x\n",
++			    fstype, path, data, syscall_flags, kern_flags);
++		}
+ 	error = mount_common(fstype, pvp, vp, &nd.ni_cnd, CAST_USER_ADDR_T(data),
+ 	    syscall_flags, kern_flags, NULL, ctx);
++	if (peridotMD) {
++		printf("pm: kernel_mount fs=%s -> %d\n", fstype, error);
++	}
+ 
+ 	if (did_namei) {
+ 		vnode_put(vp);
+@@ -1028,6 +1037,12 @@
+ 	boolean_t did_set_lmount = FALSE;
+ 	boolean_t did_set_vmount = FALSE;
+ 	boolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
++	int peridotKernelLocalargs = 0;
++	PE_parse_boot_argn("peridot-kernel-localargs", &peridotKernelLocalargs,
++	    sizeof(peridotKernelLocalargs));
++	{ int peridotMDl = 0;
++	  PE_parse_boot_argn("peridot-mount-debug", &peridotMDl, sizeof(peridotMDl));
++	  if (peridotMDl) printf("pm: localargs=%d | ", peridotKernelLocalargs); }
+ 
+ #if CONFIG_ROSV_STARTUP || CONFIG_MOUNT_VM || CONFIG_BASESYSTEMROOT
+ 	/* Check for mutually-exclusive flag bits */
+@@ -1173,7 +1188,8 @@
+ 	 */
+ 	if (kernelmount && (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS) &&
+ 	    ((internal_flags & KERNEL_MOUNT_VOLBYROLE_MASK) == 0) &&
+-	    ((internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) == 0)) {
++	    ((internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) == 0) &&
++	    !peridotKernelLocalargs) {
+ 		error = EINVAL;  /* unsupported request */
+ 		goto out1;
+ 	}
+@@ -1312,6 +1328,21 @@
+ 	if (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS &&
+ 	    !(internal_flags & (KERNEL_MOUNT_SNAPSHOT | KERNEL_MOUNT_VOLBYROLE_MASK))) {
+ 		boolean_t do_copyin_devpath = true;
++		if (peridotKernelLocalargs >= 2 && !(internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) && fsmountargs != USER_ADDR_NULL) {
++			devpath = *(user_addr_t *)(uintptr_t)fsmountargs;
++			fsmountargs += sizeof(devpath);
++			do_copyin_devpath = false;
++		} else if (peridotKernelLocalargs == 1 && !(internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) && fsmountargs != USER_ADDR_NULL) {
++			user_addr_t peridotDevPath = USER_ADDR_NULL;
++			if (copyin(fsmountargs, &peridotDevPath, sizeof(peridotDevPath)) == 0) {
++				devpath = peridotDevPath;
++				fsmountargs += sizeof(devpath);
++			}
++			do_copyin_devpath = false;
++		} else if (peridotKernelLocalargs && !(internal_flags & KERNEL_MOUNT_BASESYSTEMROOT)) {
++			devpath = USER_ADDR_NULL;
++			do_copyin_devpath = false;
++		}
+ #if CONFIG_BASESYSTEMROOT
+ 		if (internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) {
+ 			// KERNEL_MOUNT_BASESYSTEMROOT implies subtle behavior worh nothing:
+@@ -1351,11 +1382,24 @@
+ 			}
+ 		}
+ 
++		if (strncmp(fstypename, "apfs", 4) == 0) {
++			int peridotMD = 0;
++			PE_parse_boot_argn("peridot-mount-debug", &peridotMD, sizeof(peridotMD));
++			if (peridotMD) {
++				printf("pm: mount_common apfs devpath=%llx is64=%d flags=%x iflags=%x devvp=%p\n",
++				    (unsigned long long)devpath, vfs_context_is64bit(ctx), flags,
++				    internal_flags, (void *)devvp);
++			}
++		}
++
+ 		/* Lookup device and authorize access to it */
+ 		if ((devpath)) {
+ 			struct nameidata nd;
+ 
+ 			enum uio_seg seg = UIO_USERSPACE;
++			if (peridotKernelLocalargs >= 2) {
++				seg = UIO_SYSSPACE;
++			}
+ #if CONFIG_BASESYSTEMROOT
+ 			if (internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) {
+ 				seg = UIO_SYSSPACE;
+@@ -1398,6 +1442,14 @@
+ 			strlcpy(mp->mnt_vfsstat.f_mntfromname, nd.ni_cnd.cn_pnbuf, MAXPATHLEN);
+ 			nameidone(&nd);
+ 		}
++		{
++			int peridotMDv = 0;
++			PE_parse_boot_argn("peridot-mount-debug", &peridotMDv, sizeof(peridotMDv));
++			if (peridotMDv && devvp != NULLVP) {
++				printf("pm: devvp=%p vc=%d vflag=%x maj=%d\n", (void *)devvp,
++					vcount(devvp), devvp->v_flag, major(devvp->v_rdev));
++			}
++		}
+ 		/* On first mount, preflight and open device */
+ 		if (devpath && ((flags & MNT_UPDATE) == 0)) {
+ 			if ((error = vnode_ref(devvp))) {
+@@ -1414,7 +1466,7 @@
+ 				goto out2;
+ 			}
+ 
+-			if (vcount(devvp) > 1 && !(vfs_flags(mp) & MNT_ROOTFS)) {
++			if (vcount(devvp) > 1 && !(vfs_flags(mp) & MNT_ROOTFS) && !peridotKernelLocalargs) {
+ 				error = EBUSY;
+ 				goto out3;
+ 			}
+@@ -1603,6 +1655,20 @@
+ 		error = EINVAL;
+ #endif
+ 	} else {
++		if (strncmp(fstypename, "apfs", 4) == 0) {
++			int peridotMD = 0;
++			PE_parse_boot_argn("peridot-mount-debug", &peridotMD, sizeof(peridotMD));
++			if (peridotMD) {
++				uint64_t peridotMW[4] = {};
++				int peridotMCI = (fsmountargs == USER_ADDR_NULL) ? -2 : copyin(fsmountargs, peridotMW, sizeof(peridotMW));
++				printf("pm: VFS_MOUNT apfs args=%llx ci=%d w0=%llx w1=%llx w2=%llx w3=%llx\n",
++				    (unsigned long long)fsmountargs, peridotMCI,
++				    (unsigned long long)peridotMW[0],
++				    (unsigned long long)peridotMW[1],
++				    (unsigned long long)peridotMW[2],
++				    (unsigned long long)peridotMW[3]);
++			}
++		}
+ 		error = VFS_MOUNT(mp, device_vnode, fsmountargs, ctx);
+ 	}
+ 

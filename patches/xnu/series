@@ -19,5 +19,10 @@ peridot-mountroot-diag.patch
 peridot-apfs-register.patch
 peridot-rd-wait.patch
 peridot-init-args.patch
+peridot-mount-debug.patch
+peridot-kernel-mkdir.patch
+peridot-root-rw.patch
+peridot-ramfs.patch
+peridot-vm-unix-cryptex.patch
 peridot-cryptex-graft.patch
 peridot-cryptex-init.patch

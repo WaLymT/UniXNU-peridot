@@ -1,0 +1,54 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -9931,6 +9931,51 @@
+ 	           UIO_USERSPACE);
+ }
+ 
++/*
++ * peridot: kernel-side mkdir for the boot path. The cryptex mount needs
++ * /private/preboot/Cryptexes/OS on a writable staging volume before the
++ * SystemOS volume can be mounted there. mkdir1at() is the same path the
++ * mkdir(2) syscall uses; only the segment and context differ.
++ */
++int
++peridot_kernel_mkdir(const char *path)
++{
++	struct nameidata nd;
++	struct vnode_attr va;
++	vnode_t vp = NULLVP;
++	int error;
++
++	NDINIT(&nd, CREATE, OP_MKDIR, LOCKPARENT | AUDITVNPATH1, UIO_SYSSPACE,
++	    (user_addr_t)(uintptr_t)path, vfs_context_kernel());
++	nd.ni_cnd.cn_flags |= WILLBEDIR;
++	nd.ni_flag = NAMEI_COMPOUNDMKDIR;
++	error = namei(&nd);
++	printf("pmk %s namei=%d ", path, error);
++	if (error) {
++		return error;
++	}
++	if (nd.ni_vp != NULLVP) {
++		error = EEXIST;
++		goto out;
++	}
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_mode, 0755);
++	VATTR_SET(&va, va_type, VDIR);
++	error = vn_create(nd.ni_dvp, &vp, &nd, &va, 0, 0, NULL,
++	    vfs_context_kernel());
++	printf("pmk %s create=%d ", path, error);
++out:
++	nameidone(&nd);
++	if (vp != NULLVP) {
++		vnode_put(vp);
++	}
++	if (nd.ni_dvp != NULLVP) {
++		vnode_put(nd.ni_dvp);
++	}
++	return error;
++}
++
++
+ static int
+ rmdirat_internal(vfs_context_t ctx, int fd, user_addr_t dirpath,
+     enum uio_seg segflg, int unlink_flags)

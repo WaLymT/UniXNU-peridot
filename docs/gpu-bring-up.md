@@ -117,9 +117,13 @@ cannot be raised from this boot context.
 | p76-77 | does a printf harness work? | no: the framebuffer console is not up at constructor time |
 | p78 | can the hub RCG be programmed? | yes: `cmd=0x0->0x2`, ROOT_EN stays set |
 | p79 | is the AHB branch reachable now? | no: accessing 0x90c8 now aborts on the bus |
-| p80 | can the AP RSC be read? | no: DRV_ID at 0x17a00000 aborts |
+| p80 | can the AP RSC be read? | no: DRV_ID at 0x17a00000 (DRV0) aborts |
+| p81 | is the DRV choice wrong? | yes: DRV2 0x17a20000 answers, id=0x30200 v3.2 solver=0x4010100 child=0x800c8104; the RSC is alive |
 
-### Why this is not a register problem
+### Older interpretation (superseded by p81)
+
+The paragraph below was written after p80, before DRV2 was tested. See the
+2026-11-19 correction at the end of this file.
 
 The vendor `gpucc-cliffs.c` defines **no GDSCs at all** (`grep -i gdsc` returns
 nothing), while the sm8650 driver defines two. That means the CX and GX domains
@@ -140,3 +144,18 @@ UEFI to `fastboot boot` to XNU start does not.
 Until one of these is chosen, the GPU record stays `implemented`: the driver,
 the kit and the firmware image are in the kernel, and the only missing piece is
 permission to touch the hardware.
+
+## 2026-11-19 correction: p80 read the wrong DRV
+
+p80 read the AP RSC at 0x17a00000, which is DRV0. The stock DT describes three
+windows: DRV0 0x17a00000, DRV1 0x17a10000, and DRV2 0x17a20000. The touch path
+(qcom,tcs-offset = 0xd00) and the downstream fuxi/muyu RPMh work use DRV2, not
+DRV0.
+
+p81 (p481 image) proves the point: DRV2 returns id=0x30200 (v3.2),
+solver=0x4010100 and child=0x800c8104. The old "RSC is not powered" conclusion
+is wrong; the remaining work is the CPU-side ARC voter, not the mailbox power.
+
+Also check gcc_gpu_cfg_ahb_clk (GCC 0x71004 bit 0) before GPUCC; it is not a
+clk_branch in gcc-cliffs.c and the driver now sets/verifies it.
+

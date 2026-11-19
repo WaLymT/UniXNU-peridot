@@ -3064,6 +3064,99 @@ struct ShnRootWindow {
   uint32_t flags;
 };
 
+// ---------------------------------------------------------------------------
+// P0 hardware borrow from HackiOS (peridot profile): EPSS top-row boost and a
+// TSENS read-only snapshot. Temporary home until drivers/PeridotPower exists.
+// Addresses: hoshikv/xnu-kernel-peridot common/devices/peridot.conf.
+extern "C" vm_offset_t ml_io_map (vm_offset_t phys_addr, vm_size_t size);
+
+static bool gPeridotPowerBoosted;
+
+static inline uint32_t peridotMmioRead32 (vm_offset_t base, uint32_t offset)
+{
+  return *reinterpret_cast<volatile uint32_t *> (base + offset);
+}
+
+static inline void peridotMmioWrite32 (vm_offset_t base, uint32_t offset, uint32_t value)
+{
+  *reinterpret_cast<volatile uint32_t *> (base + offset) = value;
+}
+
+// EPSS: three 0x1000 groups at 0x17d91000; a 40-row frequency table at +0x100
+// and the wanted row at +0x320 (Linux qcom-cpufreq-hw.c).
+static void peridotCpuBoost (void)
+{
+  if (gPeridotPowerBoosted) return;
+  gPeridotPowerBoosted = true;
+  for (unsigned int domain = 0; domain < 3; domain++) {
+    vm_offset_t base = ml_io_map (0x17d91000ULL + domain * 0x1000ULL, 0x1000);
+    if (!base) {
+      IOLog ("NATIVE_UFS power: epss d%u map failed\n", domain);
+      continue;
+    }
+    uint32_t top = 0, topKhz = 0;
+    for (uint32_t row = 0; row < 40; row++) {
+      uint32_t entry = peridotMmioRead32 (base, 0x100 + 4 * row);
+      uint32_t khz = (entry >> 30) ? 19200U * (entry & 0xffU) : 300000U;
+      if (row > 0 && khz <= topKhz) break;
+      top = row;
+      topKhz = khz;
+    }
+    uint32_t was = peridotMmioRead32 (base, 0x320);
+    if (top > 0 && top < 40) {
+      peridotMmioWrite32 (base, 0x320, top);
+      IODelay (20000);
+    }
+    uint32_t now = peridotMmioRead32 (base, 0x320);
+    IOLog ("NATIVE_UFS power: epss d%u row %u -> %u (%u MHz) readback=%u\n",
+           domain, was, top, topKhz / 1000, now);
+    printf ("peridot power: epss d%u row %u -> %u (%u MHz) rb=%u\n",
+            domain, was, top, topKhz / 1000, now);
+  }
+}
+
+// TSENS: three TM blocks, a status word per sensor at 0xa0 + 4*n; bit 21 is
+// the valid flag and the low 12 bits are a signed temperature in tenths C.
+static void peridotThermalLog (void)
+{
+  int hottest = -10000;
+  unsigned int hotBlock = 0, hotSensor = 0, valid = 0;
+  // TM (measuring) instances carry the per-sensor status/temperature words;
+  // the SROT instances at 0xc222000/0xc223000/0xc224000 only hold calibration
+  // and configuration (peridot-stock.dts: tsensN@0xc228000 + @0xc222000).
+  static const uint64_t bases[3] = { 0xc228000ULL, 0xc229000ULL, 0xc22a000ULL };
+  for (unsigned int block = 0; block < 3; block++) {
+    vm_offset_t base = ml_io_map (bases[block], 0x1000);
+    if (!base) {
+      IOLog ("NATIVE_UFS power: tsens%u map failed\n", block);
+      continue;
+    }
+    for (unsigned int sensor = 0; sensor < 16; sensor++) {
+      uint32_t status = peridotMmioRead32 (base, 0xa0 + 4 * sensor);
+      if ((status & (1U << 21)) == 0) continue;
+      int temp = static_cast<int> (status & 0xfffU);
+      if (temp & 0x800) temp |= ~0xfff;
+      valid++;
+      if (temp > hottest) {
+        hottest = temp;
+        hotBlock = block;
+        hotSensor = sensor;
+      }
+    }
+  }
+  if (hottest <= -10000) {
+    IOLog ("NATIVE_UFS power: tsens valid=0 (no reading)\n");
+    printf ("peridot power: tsens valid=0 (no reading)\n");
+    return;
+  }
+  IOLog ("NATIVE_UFS power: tsens valid=%u hottest=%d.%d C at %u/%u\n",
+         valid, hottest / 10, hottest < 0 ? -hottest % 10 : hottest % 10,
+         hotBlock, hotSensor);
+  printf ("peridot power: tsens valid=%u hottest=%d.%d C at %u/%u\n",
+          valid, hottest / 10, hottest < 0 ? -hottest % 10 : hottest % 10,
+          hotBlock, hotSensor);
+}
+
 static bool shngrootFind (uint64_t partFirstLba, const char *name, ShnRootWindow *window)
 {
   if (!name || !window) return false;
@@ -4302,6 +4395,53 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS mount-args: userdata too small for the cryptex staging");
     }
     publishSecondNativeBdev ((first + kCryptexOffsetBlocks) * 4096ULL, kCryptexBytes);
+    return true;
+  }
+  if (probe == 56) {
+    unsigned int powerBoost = 0;
+    if (PE_parse_boot_argn ("peridot-power-boost", &powerBoost, sizeof (powerBoost)) && powerBoost) {
+      peridotCpuBoost ();
+      peridotThermalLog ();
+    }
+    // SHNGROOT userdata image with the graft plumbing: the OS window (whole-disk GPT image
+    // of the OS dmg) is the root and the SystemOS window is /dev/nu1, exactly like probe 55.
+    // The writable staging container formatted earlier at userdata + 12 GiB is published as
+    // /dev/nu2 so peridot-cryptex-probe=5 can mount it at /System/Library/Caches, copy the
+    // cryptex image into a regular file there and graft that file vnode.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS shngroot-graft: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) panic ("NATIVE_UFS shngroot-graft: no userdata partition");
+    ShnRootWindow os = {}, sysos = {};
+    if (!shngrootFind (first, "OS", &os)) panic ("NATIVE_UFS shngroot-graft: no OS window in the manifest");
+    if (!shngrootFind (first, "SystemOS", &sysos)) panic ("NATIVE_UFS shngroot-graft: no SystemOS window in the manifest");
+    if (os.size == 0 || sysos.size == 0) panic ("NATIVE_UFS shngroot-graft: empty window");
+    const uint64_t kStageOffsetBlocks = (12ULL << 30) / 4096;
+    const uint64_t kStageBlocks = (8ULL << 30) / 4096;
+    if (blocks * 4096ULL < os.offset + os.size) panic ("NATIVE_UFS shngroot-graft: OS window outside userdata");
+    if (blocks * 4096ULL < sysos.offset + sysos.size) panic ("NATIVE_UFS shngroot-graft: SystemOS window outside userdata");
+    if (blocks < kStageOffsetBlocks + kStageBlocks + 16) panic ("NATIVE_UFS shngroot-graft: userdata too small for the staging window");
+    uint64_t absolute = first * 4096ULL + os.offset;
+    uint64_t bytes = os.size;
+    skipLeadingApfsGpt (&absolute, &bytes);
+    gBdevAbsolute = absolute;
+    gBdevBytes = bytes;
+    publishNativeBdev (false);
+    if (gBdevSlot < 0) panic ("NATIVE_UFS shngroot-graft: no bdevsw slot");
+    rootdev = makedev (gBdevSlot, 0);
+    native_ufs_bdev_claim_root = 1;
+    publishSecondNativeBdev (first * 4096ULL + sysos.offset, sysos.size);
+    uint64_t stageFirst = first + kStageOffsetBlocks;
+    if (!hostTargetOpen (stageFirst, kStageBlocks)) panic ("NATIVE_UFS shngroot-graft: cannot open the staging window");
+    publishThirdNativeBdev (stageFirst * 4096ULL, kStageBlocks * 4096ULL);
+    IOLog ("NATIVE_UFS shngroot-graft: os off=%llx sz=%llx bd=%llx sysos off=%llx sz=%llx stage lba=%llx\n",
+           static_cast<unsigned long long> (os.offset),
+           static_cast<unsigned long long> (os.size),
+           static_cast<unsigned long long> (gBdevBytes),
+           static_cast<unsigned long long> (sysos.offset),
+           static_cast<unsigned long long> (sysos.size),
+           static_cast<unsigned long long> (stageFirst));
     return true;
   }
   if (probe == 55) {

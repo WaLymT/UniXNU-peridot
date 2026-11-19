@@ -92,6 +92,8 @@ trust_cache_sha256 = ["32462f52946f5f53953c1fa0a679241eddb1226c9ecdfd318f9bea248
 size_mib = 64
 loader = "firmware"
 title = "UniXNU (peridot)"
+# Enable the firmware Tools menu (Advanced Logger QR exporter).
+tools = true
 # The panic screen and the entry probe share the kernel's padding, and together
 # they do not fit (the panic blob alone is 0xa2f bytes). While locating the
 # handoff stall, keep the probe and drop the panic screen.
