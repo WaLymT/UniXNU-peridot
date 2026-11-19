@@ -58,3 +58,10 @@ p538 的组合是可启动基线。
 - p547: relaxed input validation; host still no UEFI Fastboot.
 - p548: Fastboot entry copies full XNU args + initrd; host still no enumeration.
 - Conclusion: explicit entry does not reproduce p539 USB path. p538/p539 remain the only known-good baseline; do not use p543-p548 as mainline.
+## 2026-11-19 23:58 ׷��
+
+- p545/p547 screenshots show DARWINBOOT Fastboot UI active: USB host connected, 65540 bytes staged.
+- However `usb rx queue failed: Not Ready` repeats; `fastboot devices` is empty and `oem log` returns unknown.
+- Root cause is now the Fastboot USB OUT transfer queue, not the menu timeout or Fastboot entry.
+- Fastboot.c FastbootUsbRead calls mUsb->Send(USB_EP_OUT) and returns on Not Ready; the endpoint is not rearmed/retried.
+- Next: fix the USB RX transfer rearm/retry, then re-test fastboot oem log.
