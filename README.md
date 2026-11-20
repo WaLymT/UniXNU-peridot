@@ -71,6 +71,10 @@ inputs and never enter this repository.
 Do not fill these by guesswork; each one either defines a memory window or
 selects a filesystem.
 
+## Credits
+
+Borrowed code and repository sources are listed in [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
+
 ## Documentation
 
 - [Device repository](https://unixnu.com/porting/device-repository)
