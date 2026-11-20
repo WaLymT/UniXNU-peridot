@@ -107,6 +107,10 @@ inputs and never enter this repository.
 Do not fill these by guesswork; each one either defines a memory window or
 selects a filesystem.
 
+## Handoff
+
+- [2026-11-20 handoff: local and remote repositories](docs/HANDOFF-2026-11-20.md)
+
 ## Documentation
 
 - [Device repository](https://unixnu.com/porting/device-repository)
