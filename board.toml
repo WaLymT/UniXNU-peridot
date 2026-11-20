@@ -18,7 +18,7 @@ os_profile = "ipados-17.7.11-21H461"
 # XnuPrelink are required to boot. Storage, display and input components are
 # added once their board recipes exist; see the porting record for the order.
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "ShengUfs", "Adreno735"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "ShengUfs"]
 
 [kernel]
 defconfig = "peridot_defconfig"
@@ -41,9 +41,6 @@ archives = [
   "component:VirtioMmioBlock",
   "component:ShengUfs",
   "build-ufs-bindings.py",
-  "component:Adreno735",
-  "build-adreno735-kits.py",
-  "build-sheng-platform-power.py",
 ]
 
 # [kernel.prelink] is inherited from the OS profile: the iPadOS 17.7.11
