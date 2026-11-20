@@ -10,11 +10,11 @@ summary = "Redmi Turbo 3 / POCO F6 on Qualcomm SM8635 (cliffs). The board select
 id = "configuration"
 status = "implemented"
 components = []
-paths = ["board.toml", "feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore"]
+paths = ["feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore"]
 inputs = ["SM8635 shared support, the iPadOS 17.7.11 profile, this board's defconfig and the pinned component sources."]
 configuration = ["board.soc = SM8635; board.soc_source = sm8635; board.os_profile = ipados-17.7.11-21H461.", "The board selects only ArmDTPlatform, ArmCpu, SoftwareAES, XnuPrelink and DarwinBoot; storage, display and input components are added when their board recipes exist."]
 procedure = ["Read https://unixnu.com/porting/device-repository and https://unixnu.com/porting/records.", "Run ./unixnu defconfig peridot_defconfig -D ../UniXNU-peridot from the UniXNU checkout.", "Run ./unixnu status --json -D ../UniXNU-peridot and review profiles, components, source pins and patch order."]
-findings = ["Tables merge in ARM64, SoC, OS and device order. Arrays replace inherited selections, so every required component and fragment is listed explicitly.", "The board inherits [ipsw] and [kernel.prelink] from the OS profile. Overriding either in board.toml would desynchronise the kernelcache pin from the components it was qualified against."]
+findings = ["Tables merge in ARM64, SoC, OS and device order. Arrays replace inherited selections, so every required component and fragment is listed explicitly.", "The board inherits [ipsw] and [kernel.prelink] from the OS profile. Overriding either in board.toml would desynchronise the kernelcache pin from the components it was qualified against.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["All source pins resolve, status shows the intended component set and patch order, and the porting record check passes."]
 limits = ["The SM8635 shared repository is new and unverified; its addresses are copied from the board's stock DTS."]
 next_action = ["Resolve the SM8635 source pin and run status once the shared repository is published."]
@@ -28,11 +28,11 @@ result = "Board identity, profile selection, component list, firmware and payloa
 id = "firmware"
 status = "device-verified"
 components = ["DarwinBoot"]
-paths = ["board.toml", "proprietary-files.txt", "package/", "docs/uefi-bringup.md"]
+paths = ["proprietary-files.txt", "package/", "docs/uefi-bringup.md"]
 inputs = ["Mu-Silicium Platforms/Xiaomi/peridotPkg, its Resources/Configs/peridot.toml, the stock firmware DTB and the PSCI SMC interface."]
 configuration = ["firmware.dsc = Platforms/Xiaomi/peridotPkg/peridot.dsc; firmware.config = peridot; firmware.fd = Build/peridotPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd.", "The firmware DSC and FDF must embed UniXNU, UniXNUDxe, DarwinBoot, UniXNURamDiskDxe, DiskIoDxe and FAT support.", "bootimg.image pins header_version = 0 and pagesize = 4096; the device rejects every signed-header variant."]
 procedure = ["Build the stock peridotPkg firmware first and boot it with fastboot boot to verify display, side buttons and block devices.", "Then run ./unixnu build firmware -D ../UniXNU-peridot --uefi ../Mu-Silicium and boot the resulting image."]
-findings = ["peridotPkg already loads at 0xA7100000 with size 0x300000 and reports display, internal storage, side buttons, USB device mode and mass storage as working in the Mu-Silicium status page.", "Mu-Silicium labels peridot Inactive: the platform has no active maintainer, so any firmware fault has to be fixed here.", "Measured on the device: the RELEASE build produces a 3 MiB SILICIUM_UEFI.fd and the Silicium UEFI menu appears on the panel.", "Header v4, v4 with os_version and v1 are all rejected with Failed to load/authenticate boot image: Invalid Parameter; only header v0 with pagesize 4096 boots.", "With no bootable entry the menu returns to the bootloader after a while, and repeated failed fastboot boot attempts make the bootloader mark the active slot unbootable until fastboot --set-active clears it.", "p538: the p490 FD baseline is reproduced from hoshikv DarwinBoot plus the full hoshikv patched vendor driver set in a RELEASE build; with no fastbootdebug arg it reaches the XNU GDSC probe.", "p539: the same image with fastbootdebug=1 shows the DARWINBOOT Fastboot UI and the host enumerates it (fastboot devices -> bf7c781b, getvar product -> peridot).", "p540: payload timeout=-1 holds the UniXNU menu; the Fastboot overlay is only entered when an XNU entry is booted, so a separate menu action is required.", "p544-p548: an explicit Fastboot menu entry reaches DarwinBoot but does not reproduce the p539 USB path; early zero-context Fastboot and relaxed validation are not usable."]
+findings = ["peridotPkg already loads at 0xA7100000 with size 0x300000 and reports display, internal storage, side buttons, USB device mode and mass storage as working in the Mu-Silicium status page.", "Mu-Silicium labels peridot Inactive: the platform has no active maintainer, so any firmware fault has to be fixed here.", "Measured on the device: the RELEASE build produces a 3 MiB SILICIUM_UEFI.fd and the Silicium UEFI menu appears on the panel.", "Header v4, v4 with os_version and v1 are all rejected with Failed to load/authenticate boot image: Invalid Parameter; only header v0 with pagesize 4096 boots.", "With no bootable entry the menu returns to the bootloader after a while, and repeated failed fastboot boot attempts make the bootloader mark the active slot unbootable until fastboot --set-active clears it.", "p538: the p490 FD baseline is reproduced from hoshikv DarwinBoot plus the full hoshikv patched vendor driver set in a RELEASE build; with no fastbootdebug arg it reaches the XNU GDSC probe.", "p539: the same image with fastbootdebug=1 shows the DARWINBOOT Fastboot UI and the host enumerates it (fastboot devices -> bf7c781b, getvar product -> peridot).", "p540: payload timeout=-1 holds the UniXNU menu; the Fastboot overlay is only entered when an XNU entry is booted, so a separate menu action is required.", "p544-p548: an explicit Fastboot menu entry reaches DarwinBoot but does not reproduce the p539 USB path; early zero-context Fastboot and relaxed validation are not usable.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["The firmware boots, shows the UniXNU menu, publishes the payload RAM disk and hands the framebuffer to DarwinBoot."]
 limits = ["The peridot firmware configuration is unmaintained upstream; SM8635 and SM7675 share the Palawan platform package.", "The firmware volume has no bootable entry yet, so the menu is the end of the current chain."]
 next_action = ["Keep p538/p539 as the firmware baseline; add an explicit Fastboot action inside the UniXNU application rather than faking an XNU entry, then verify oem log with the host."]
@@ -78,11 +78,11 @@ result = "SMP boot on all 8 cores (MAX_CPUS 8 / MAX_CPU_CLUSTERS 2 fixed the top
 id = "memory"
     status = "device-verified"
 components = []
-paths = ["dts/**", "dts/vendor/peridot-stock.dts", "board.toml"]
+paths = ["dts/**", "dts/vendor/peridot-stock.dts"]
 inputs = ["DRAM at 0x80000000, 12 GiB on this unit (ddr_size = 0x0c). UEFI runs inside 0xA7100000 to 0xA7400000; the display reservation is 0xE3940000 with size 0x2B00000."]
 configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size = 0x80000000 and payload.adt.owned_memory_size = 0x100000000 are the values the working images boot with; they are smaller than the 12 GiB physical DRAM because the bring-up only needs a contiguous owned window."]
 procedure = ["Compare the firmware memory map, the DTS memory and reserved-memory nodes and the ADT memory-map entries before the first boot.", "Check every DMA range against the controller address width and SMMU mapping before enabling a driver."]
-findings = ["DRAM is 12 GiB on this unit but the ADT publishes a smaller owned window; the apps SMMU sits at 0x15000000 and the UFS DMA stream 0x60 is bypassed through it.", "2026-11-15: a 176 MiB wired buffer for the APFS container is allocated and addressed by the UFS DMA engine, and the same path writes back to UFS (p356)."]
+findings = ["DRAM is 12 GiB on this unit but the ADT publishes a smaller owned window; the apps SMMU sits at 0x15000000 and the UFS DMA stream 0x60 is bypassed through it.", "2026-11-15: a 176 MiB wired buffer for the APFS container is allocated and addressed by the UFS DMA engine, and the same path writes back to UFS (p356).", "Adreno735 and Sm8635Platform are now registered in the public catalog branch; the device porting record can select them again. The upstream catalog push still needs merge access.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["Every handoff region is accounted for and each DMA engine reaches its range with the documented cache policy."]
 limits = ["The RAM size varies by SKU and the ADT owned window is smaller than physical DRAM; the 184 MiB APFS container is allocated as wired memory at boot."]
 next_action = ["Read the firmware memory map and record it here.", "Size the ADT owned window from the real memory map before any large install target is mapped."]
@@ -94,6 +94,11 @@ command = "fastboot boot out/Mu-peridot-p354.img and out/Mu-peridot-p359.img wit
 revision = "5aba75132ed14960f3205fa810aaf64cca67c982"
 result = "The 184,549,376-byte APFS container is read into a 176 MiB wired buffer and registered with mdevadd; the same SMMU/DMA path writes back (p356 match=1 restore=0/0 ok=1)."
 
+[[area.evidence]]
+kind = "source"
+reference = "board.toml"
+result = "Public main selects only catalog components; Adreno735 is intentionally kept on wip/ufs-smmu."
+
 
 [[area]]
 id = "storage"
@@ -101,11 +106,11 @@ id = "storage"
     # IOStorageFamily hand-off work; the root volume still does not mount.
     status = "device-verified"
 components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot"]
-paths = ["board.toml", "feeds.toml", "configs/peridot_defconfig", "drivers/ShengUfs", "dts/vendor/peridot-stock.dts"]
+paths = ["feeds.toml", "configs/peridot_defconfig", "drivers/ShengUfs", "dts/vendor/peridot-stock.dts"]
 inputs = ["UFS host at 0x1d84000 with size 0x3000, ICE at 0x1d88000, ICE hardware key manager at 0x1d90000, MCQ registers, PHY at 0x1d80000 and the apps SMMU stream 0x60."]
 configuration = ["ShengUfs is vendored under drivers/ShengUfs and declared as a local source in feeds.toml, so it can be adapted for cliffs and the build survives an unreachable github.com.", "Root path (2026-11-15): native-ufs-probe=18 reads the 184,549,376-byte RestoreRamDisk APFS container from the start of userdata into wired memory, registers it as md1 and leaves it as rootdev; rd=md1 plus patches/xnu/peridot-rd-wait.patch mount it through the APFS restore/ramdisk branch, and the same window is published as a writable IOBlockStorageDevice (disk0/disk1/disk1s1).", "peridot-apfs-register.patch re-registers the prelinked apfs vfs in front of mockfs; peridot-rootauth.patch lets peridot-allow-unsigned-root=1 replace the missing volume seal."]
 procedure = ["Read the GPT and confirm the userdata entry before writing any board value.", "After WSL access is available, run the peridot UFS binding wrapper on the active tree and verify its archive and current kernel.json; then boot with native-ufs-probe=2 and =10 for read-only transport/GPT checks before any write."]
-findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions the SM8550 implementation does not use.", "Fix A from audit/2026-11-15-enotblk.md works: the UFS window is published as a bdevsw disk, claimed and adopted inside the rd= wait loop, and APFS mounts the container through its ramdisk restore branch from the real UFS disk.", "The bdevsw path needs the page-cache buf_map strategy, a real write path (WRITE(10)+FUA through ufsWriteWindow with counts in 512-byte blocks) and the disk ioctl contract (DKIOCGETFEATURES/ISSOLIDSTATE/SYNCHRONIZE plus max-transfer/segment); Apple newfs_apfs then formats the 8 GiB install target (p381).", "The iPadOS System container extracted from the IPSW OS image (6,077,546,496 bytes, NXSB, block_count 1483776) can be staged into userdata through a fastboot sparse image and mounted as root: its /sbin/launchd is exec-ed from UFS (p383). dyld then needs the shared cache, which iOS 16+ keeps in a cryptex (Cryptex1,SystemOS)."]
+findings = ["The host and PHY addresses match SM8550, but the PHY compatible is qcom,ufs-phy-qmp-v4-cliffs and the controller adds ICE and MCQ regions the SM8550 implementation does not use.", "Fix A from audit/2026-11-15-enotblk.md works: the UFS window is published as a bdevsw disk, claimed and adopted inside the rd= wait loop, and APFS mounts the container through its ramdisk restore branch from the real UFS disk.", "The bdevsw path needs the page-cache buf_map strategy, a real write path (WRITE(10)+FUA through ufsWriteWindow with counts in 512-byte blocks) and the disk ioctl contract (DKIOCGETFEATURES/ISSOLIDSTATE/SYNCHRONIZE plus max-transfer/segment); Apple newfs_apfs then formats the 8 GiB install target (p381).", "The iPadOS System container extracted from the IPSW OS image (6,077,546,496 bytes, NXSB, block_count 1483776) can be staged into userdata through a fastboot sparse image and mounted as root: its /sbin/launchd is exec-ed from UFS (p383). dyld then needs the shared cache, which iOS 16+ keeps in a cryptex (Cryptex1,SystemOS).", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["SCSI capacity, GPT and known blocks are correct, then the configured root volume mounts and launchd starts."]
 limits = ["The root is mounted through APFS's restore/ramdisk branch and is read-only; a writable system volume needs the mount flags opened or a native block-device root.", "The staged iPadOS System container is bootable far enough to exec launchd but cannot run it without the dyld shared cache / cryptex content; the restore container remains at userdata offset 0 and the OS container at offset 1 GiB.", "The bdevsw strategy is serialised by one lock; the screen remains the only diagnostic channel."]
 next_action = ["The official SHNGROOT userdata install flow is verified on hardware: userdata-root.img (9,382,658,048 bytes) was flashed (12 chunks, 226 s) and Mu-peridot-p418.img (PROBE=55) parsed the SHNGROOT manifest, skipped the OS window GPT, claimed the Apple_APFS partition as root and started launchd from /sbin/launchd; only the dyld shared cache (SystemOS cryptex) is still missing. Next: probe 56 = SHNGROOT OS root + SystemOS (/dev/nu1) + the 12 GiB staging volume (/dev/nu2), then the probe=5 file-vnode graft flow (mount staging, copy cryptex.img, graft) to provide the cache.", "Keep the ad-hoc probes (native-ufs-probe 18/40/45) available for bisection; the 8 GiB staging container at 12 GiB survived the 9.4 GB userdata flash."]
@@ -140,11 +145,11 @@ evidence = [
 id = "display"
     status = "device-verified"
 components = []
-paths = ["board.toml", "dts/**"]
+paths = ["dts/**"]
 inputs = ["Framebuffer 1220 by 2712 at 32 bits per pixel, published by UEFI GOP and reserved at 0xE3940000 with size 0x2B00000."]
 configuration = ["bootimg.dtb_node adds /reserved-memory/splash_region with label cont_splash_region for the boot image.", "adt.product.string overrides artwork-display-gamut to sRGB for the 8-bit GOP path."]
 procedure = ["Confirm the panel is initialised by the bootloader and that GOP reports the expected geometry.", "Select GopFramebuffer once the kernel reaches the display checkpoint."]
-findings = ["The stock DTS contains three panel variants (n16t_42_02_0a, n16t_36_0f_0b and n16t_42_0a_0c), but the UniXNU path drives the UEFI framebuffer and does not program the panel.", "The UEFI framebuffer geometry matches the panel resolution, so no scaling step is needed."]
+findings = ["The stock DTS contains three panel variants (n16t_42_02_0a, n16t_36_0f_0b and n16t_42_0a_0c), but the UniXNU path drives the UEFI framebuffer and does not program the panel.", "The UEFI framebuffer geometry matches the panel resolution, so no scaling step is needed.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["A known frame appears with correct geometry and colours, then userland presentation works."]
 limits = ["Display depends on the bootloader having trained the panel; XNU does not program the panel and there is no userland compositor."]
 next_action = ["Record the reported GOP geometry on the device.", "Keep the framebuffer console as the only evidence channel until a compositor exists."]
@@ -161,11 +166,11 @@ result = "The UEFI GOP framebuffer console shows kernel and launchd output on th
 id = "input"
 status = "planned"
 components = []
-paths = ["dts/vendor/peridot-stock.dts", "board.toml"]
+paths = ["dts/vendor/peridot-stock.dts"]
 inputs = ["Focaltech N16T-3683G touch controller on SPI, reported by the stock DTS as xiaomi,peridot-spi and focaltech,n16t-3683g-spi. Side buttons are separate GPIO keys."]
 configuration = ["adt.buttons declares hold, voldown and volup without a menu button and sets home-button-type = 2 for gesture navigation."]
 procedure = ["Read the touch controller identification from the stock firmware to confirm the panel and touch pairing on this unit.", "Implement a SPI transport and a focaltech report decoder, then publish them through the HID input path."]
-findings = ["HakiOS does drive FocalTech: its hakios.goodix.c handles both Goodix GT9916 and FocalTech FT3680 with a 116448-byte firmware blob in hakios.focaltech_fw.h, and multitouch works on the POCO X5 Pro (redwood).", "The stock DTS also carries a goodix node, so units may differ in touch supplier.", "The low-risk path stays inside UniXNU: ShengHidInput and QcomGeniSpi are proven on sheng, so only the focaltech report decoder has to be written."]
+findings = ["HakiOS does drive FocalTech: its hakios.goodix.c handles both Goodix GT9916 and FocalTech FT3680 with a 116448-byte firmware blob in hakios.focaltech_fw.h, and multitouch works on the POCO X5 Pro (redwood).", "The stock DTS also carries a goodix node, so units may differ in touch supplier.", "The low-risk path stays inside UniXNU: ShengHidInput and QcomGeniSpi are proven on sheng, so only the focaltech report decoder has to be written.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["Touch reports reach the HID stack and drive the lock screen and SpringBoard."]
 limits = ["No input driver is selected beyond the ADT button declaration."]
 next_action = ["Confirm the controller on this unit (focaltech,n16t-3683g-spi), then write the focaltech decoder on top of ShengHidInput and QcomGeniSpi."]
@@ -185,7 +190,12 @@ completion = ["A GPU provider matches the ADT node and renders a frame."]
 limits = ["Only the window map and the kit bind are verified; no GMU register has been read or written, and the firmware stage still needs memory allocated before bsd_init."]
 next_action = ["DRV2 at 0x17a20000 answers: p481 reports id=0x30200 v3.2, solver=0x4010100, child=0x800c8104. Port the Muyu/fuxi ARC voter logic equivalently, with a dedicated AP-RSC mapping instead of their window-5 IO peer, and validate cmd-db/TCS against the live snapshot. Keep the gcc_gpu_cfg_ahb_clk (0x71004 bit 0) precondition before GPUCC.", "Park stage 3 until CX can be voted; the GMU code is ready behind the power gate.", "Keep the GPU record evidence current so the next session starts from the RSC finding rather than the GPUCC one."]
 
-evidence = [{ kind = "device", reference = "docs/gpu-bring-up.md", command = "fastboot boot out/Mu-peridot-p66.img with kernel_args -v native-ufs-probe=15 ... peridot-gpu=1 peridot-gpu-panic=1", revision = "c2cd2c7fa2c58cc882d7052aebf8ab84dd2b8042", result = "panic NU735 ctor gpu=1 mapped=5 bind=0 at NativeAdreno735.cpp:92: five windows mapped and ShengGmuBindMmio returned ShengGmuSuccess." }, { kind = "device", reference = "docs/gpu-bring-up.md", command = "fastboot boot out/Mu-peridot-p481.img with kernel_args peridot-gpu=1 peridot-rsc-probe=2", revision = "p481", result = "panic NU735 rsc drv=2 base=0x17a20000 id=0x30200 v3.2 solver=0x4010100 child=0x800c8104; AP RSC DRV2 is alive, p80 DRV0 was the wrong window." }]
+evidence = [{ kind = "device", reference = "docs/gpu-bring-up.md", command = "fastboot boot out/Mu-peridot-p66.img with kernel_args -v native-ufs-probe=15 ... peridot-gpu=1 peridot-gpu-panic=1", revision = "c2cd2c7fa2c58cc882d7052aebf8ab84dd2b8042", result = "panic NU735 ctor gpu=1 mapped=5 bind=0 at NativeAdreno735.cpp:92: five windows mapped and ShengGmuBindMmio returned ShengGmuSuccess." }, { kind = "device", reference = "docs/gpu-bring-up.md", command = "fastboot boot out/Mu-peridot-p481.img with kernel_args peridot-gpu=1 peridot-rsc-probe=2", revision = "b80e3ab71fb6f0812631b3dd2ef7dae8c245b9e0", result = "panic NU735 rsc drv=2 base=0x17a20000 id=0x30200 v3.2 solver=0x4010100 child=0x800c8104; AP RSC DRV2 is alive, p80 DRV0 was the wrong window." }]
+
+[[area.evidence]]
+kind = "source"
+reference = "components.toml"
+result = "Catalog registration for Sm8635Platform and Adreno735 prepared in the public catalog branch (catalog commit 4516c0b)."
 
 [[area]]
 id = "network"
@@ -254,11 +264,11 @@ evidence = []
 id = "power"
 status = "planned"
 components = []
-paths = ["dts/**", "board.toml"]
+paths = ["dts/**"]
 inputs = ["PMIC and regulator topology from the stock DTS, plus the RPMh resource set at 0x17a00000."]
 configuration = ["No power policy is configured. payload.adt.defaults sets only sleep-disabled when needed."]
 procedure = ["Record the regulator topology and the CPU frequency domains before adding any power policy.", "Drive the regulators from the board package rather than the kernel."]
-findings = ["The stock DTS declares the RPMh controller and the regulator tree; none of it is modelled in the current dtsi.", "The SM8550 board package keeps its power policy in the board, and this port follows that split."]
+findings = ["The stock DTS declares the RPMh controller and the regulator tree; none of it is modelled in the current dtsi.", "The SM8550 board package keeps its power policy in the board, and this port follows that split.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["Rails come up in the documented order and the device survives a suspend and resume cycle."]
 limits = ["No power management is implemented."]
 next_action = ["Extract the regulator tree from the stock DTS."]
@@ -269,14 +279,19 @@ evidence = []
 id = "packaging"
     status = "host-verified"
 components = ["SoftwareAES", "XnuPrelink"]
-paths = ["board.toml", "configs/**", "patches/xnu/**", "package/"]
+paths = ["board.toml", "configs/**", "patches/xnu/**", "package/", "LICENSE", "README.md", "README.zh-CN.md", "docs/**", "tools/**"]
 inputs = ["The iPadOS 17.7.11 kernelcache, trust cache bundle, Data seed, platform seed and the firmware DTB."]
 configuration = ["config_fragments and patch_series list arch, soc, os and device roots in that order.", "payload.size_mib = 64 and payload.trust_cache_sha256 pins the bundle (StaticTrustCache v2 2478 + converted RestoreTrustCache v2 267, sha256 32462f52...860d); payload.volume = PERIDOT. panic_screen is off because the panic blob and the entry probe share the kernel padding.", "payload.kernel_args = [-v, native-ufs-probe=18, sheng-pmgr=2, amfi_get_out_of_my_way=1, peridot-allow-unsigned-root=1, offline-apfs-load=1, rd=md1, amfi-allows-trust-cache-load=1, amfi_allow_any_signature=1, -restore]."]
 procedure = ["Run ./unixnu ipsw fetch, then ./unixnu kernel, package, firmware, payload and bootimg in that order.", "Keep the kernelcache, trust cache and Data seed outside the repository."]
-findings = ["Prelink inputs come from the OS profile; this board must not restate them.", "2026-11-15: the kernel build is reproducible (same kernel.macho sha256 4d078ac1... across runs), the kernel blob is gzip mtime=0 (1,830,003 bytes), every payload build re-extracts kernel.macho/trust cache/Data seed and compares them with the inputs, and out/manifests/<name>.json records the hashes (current kernel sha256 2cb5e7ad..., image p360 68,943,872 bytes).", "The macOS-only skip-setup and seed-data-grow steps are not needed for the RAM-disk root path."]
+findings = ["Prelink inputs come from the OS profile; this board must not restate them.", "2026-11-15: the kernel build is reproducible (same kernel.macho sha256 4d078ac1... across runs), the kernel blob is gzip mtime=0 (1,830,003 bytes), every payload build re-extracts kernel.macho/trust cache/Data seed and compares them with the inputs, and out/manifests/<name>.json records the hashes (current kernel sha256 2cb5e7ad..., image p360 68,943,872 bytes).", "The macOS-only skip-setup and seed-data-grow steps are not needed for the RAM-disk root path.", "LICENSE is the repository license file and is owned by this packaging area; README/docs/tools public snapshot files are tracked here as well.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["Every step produces its artifact and the boot image contains the expected firmware, device tree and payload."]
 limits = ["There is no clean-checkout CI: the WSL build tree /root/work/UniXNU and the EDK2 tree behind C:/ms are prepared by hand and only their heads/hashes are recorded.", "The boot-image ramdisk limit is 96 MiB; the payload budget is checked in build-apfs-md.sh and there is ~30 MiB headroom."]
 next_action = ["Freeze the C:/ms firmware diff and the /root/work/UniXNU revision into the record before the next prelink change.", "Add the same gates to a clean CI build once the last hand-built dependency is scripted."]
+
+[[area.evidence]]
+kind = "source"
+reference = "LICENSE"
+result = "Repository license file added to the public snapshot; packaging area records its ownership."
 
 [[area.evidence]]
 kind = "host"
@@ -290,11 +305,11 @@ result = "Kernel rebuilt (4d078ac1810de8c3... reproduced, then 2cb5e7ad57102cbf.
 id = "diagnostics"
     status = "device-verified"
 components = []
-paths = ["board.toml", "package/"]
+paths = ["package/"]
 inputs = ["UEFI log buffer at 0x81CE4000, the panic screen patch and the boot progress checkpoints."]
 configuration = ["payload.panic_screen is enabled; kernel_args include -v, serial=3 and boot-progress=2.", "No board diagnostics package exists yet."]
 procedure = ["Capture the firmware log before the kernel handoff and keep each checkpoint separately.", "Use the bring-up guide to record the first failing checkpoint."]
-findings = ["The peridot memory map provides a UEFI log region, so firmware faults can be captured without a UART.", "The phone exposes USB device mode, so logs can be retrieved without serial hardware."]
+findings = ["The peridot memory map provides a UEFI log region, so firmware faults can be captured without a UART.", "The phone exposes USB device mode, so logs can be retrieved without serial hardware.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["A failing boot identifies its last completed checkpoint from captured logs."]
 limits = ["Panic format strings must stay 32-bit: %llu/%o abort inside __doprnt on this build (HANDOFF-2026-11-15.md section 7); two diagnostics still use 64-bit specifiers and are known debt."]
 next_action = ["Capture the firmware log from the first boot attempt.", "Replace the remaining 64-bit panic specifiers and add a build-time lint for them."]
@@ -307,11 +322,11 @@ evidence = [  { kind = "device", reference = "drivers/ShengUfs/SmmuTakeover.h", 
 id = "userspace"
 status = "device-verified"
 components = ["ShengUfs", "DarwinBoot"]
-paths = ["configs/peridot_defconfig", "board.toml", "scripts/mockfs-launchd.S"]
+paths = ["configs/peridot_defconfig", "scripts/mockfs-launchd.S"]
 inputs = ["mockfs (XNU's minimal executable-root filesystem), a Data ramdisk carrying a static arm64 Mach-O, and rd=md0."]
 configuration = ["CONFIG_XNU_SOURCE_MOCKFS=y is the last mockfs line in configs/peridot_defconfig. xnu_env() takes the last value, and an earlier '# CONFIG_XNU_SOURCE_MOCKFS is not set' silently disabled the build (the vfs_conf.o marker stayed 0 and no mockfs symbol reached the kernel).", "board.toml sets kernel_args = -v rd=md0 sheng-pmgr=2 amfi_get_out_of_my_way=1 peridot-allow-unsigned-root=1, payload packed_data_ramdisk = false so the ADT publishes a plain RAMDisk, and no native-ufs-probe value so the UFS driver does not touch rootdev.", "The root device content is a static Mach-O built by tools/build-launchd.sh. tools/add-unixthread.py replaces LC_MAIN with LC_UNIXTHREAD because load_lcmain() marks LC_MAIN images as needing dyld, and clears MH_DYLDLINK/MH_PIE; tools/strip-dylinker.py rewrites the LC_LOAD_DYLINKER command as two LC_SOURCE_VERSION commands so no file offset moves.", "peridot-allow-unsigned-root=1 makes process_signature() treat the unsigned ramdisk executable as CS_SIGNED|CS_VALID; without it the MAC exec hook kills pid 1 with OS_REASON_EXEC/SECURITY_POLICY before any user code runs."]
 procedure = ["bash peridot/tools/build-launchd.sh", "bash peridot/tools/build-ramdisk-root.sh pNNN (payload with --data-ramdisk, 64 MiB crop, mkbootimg)", "fastboot boot out/Mu-peridot-pNNN.img"]
-findings = ["launchd and dyld run from the UFS-backed APFS restore root (p368/p371), which proves the signed userspace contract on this board.", "p372-p381: the kernel execs an Apple tool as pid 1 from peridot-init-path/arg1..3 boot arguments and the tool really drives the platform storage. After fixing the bdevsw write count units (buf_count bytes vs 512-byte blocks) and the disk ioctls newfs_apfs requires (DKIOCGETFEATURES / DKIOCISSOLIDSTATE / DKIOCSYNCHRONIZE), newfs_apfs formatted the 8 GiB install target and the kernel found the APFS NXSB superblock at offset 32 (p381).", "p376-p379: newfs_apfs pushed 1088+ strategy writes (including a full-device initialization pass) with no I/O errors and the writes are on disk (p378 scan: nz=3 firstnz=1), so the bdevsw RMW/FUA path works under real tool traffic."]
+findings = ["launchd and dyld run from the UFS-backed APFS restore root (p368/p371), which proves the signed userspace contract on this board.", "p372-p381: the kernel execs an Apple tool as pid 1 from peridot-init-path/arg1..3 boot arguments and the tool really drives the platform storage. After fixing the bdevsw write count units (buf_count bytes vs 512-byte blocks) and the disk ioctls newfs_apfs requires (DKIOCGETFEATURES / DKIOCISSOLIDSTATE / DKIOCSYNCHRONIZE), newfs_apfs formatted the 8 GiB install target and the kernel found the APFS NXSB superblock at offset 32 (p381).", "p376-p379: newfs_apfs pushed 1088+ strategy writes (including a full-device initialization pass) with no I/O errors and the writes are on disk (p378 scan: nz=3 firstnz=1), so the bdevsw RMW/FUA path works under real tool traffic.", "Adreno735 and Sm8635Platform are registered in the public catalog branch; the device porting record can select them again."]
 completion = ["init executes a static arm64 image, its syscalls return correct results, and the output reaches the panel."]
 limits = ["pid 1 can be any existing ramdisk executable via the boot arguments, but there is no shell in the restore ramdisk and the APFS root is read-only, so multi-step tool runs need one binary per boot or a custom static init; tool output is invisible because the exec path has no console file descriptors.", "newfs_apfs can format the install target, but running asr/restored against it still needs the IPSW OS image on the device (or a userspace disk-image channel) and the tools have to be driven one boot invocation at a time."]
 evidence = [
