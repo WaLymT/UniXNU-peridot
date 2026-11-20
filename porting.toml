@@ -76,15 +76,15 @@ result = "SMP boot on all 8 cores (MAX_CPUS 8 / MAX_CPU_CLUSTERS 2 fixed the top
 
 [[area]]
 id = "memory"
-    status = "device-verified"
+    status = "implemented"
 components = []
-paths = ["dts/**", "dts/vendor/peridot-stock.dts"]
+paths = ["dts/**", "dts/vendor/peridot-stock.dts", "docs/memory-audit.md"]
 inputs = ["DRAM at 0x80000000, 12 GiB on this unit (ddr_size = 0x0c). UEFI runs inside 0xA7100000 to 0xA7400000; the display reservation is 0xE3940000 with size 0x2B00000."]
-configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size = 0x80000000 and payload.adt.owned_memory_size = 0x100000000 are the values the working images boot with; they are smaller than the 12 GiB physical DRAM because the bring-up only needs a contiguous owned window."]
+configuration = ["device_tree.source = device:dts/peridot.dts with include_dirs = [soc:dts].", "payload.dram_size = 0x80000000 and payload.adt.owned_memory_size = 0x80000000; both match the single 2 GiB DTS window. The earlier 0x100000000 owned size exceeded the declared DRAM and is historical only."]
 procedure = ["Compare the firmware memory map, the DTS memory and reserved-memory nodes and the ADT memory-map entries before the first boot.", "Check every DMA range against the controller address width and SMMU mapping before enabling a driver."]
-findings = ["DRAM is 12 GiB on this unit but the ADT publishes a smaller owned window; the apps SMMU sits at 0x15000000 and the UFS DMA stream 0x60 is bypassed through it.", "2026-11-15: a 176 MiB wired buffer for the APFS container is allocated and addressed by the UFS DMA engine, and the same path writes back to UFS (p356).", "The public main board.toml omits the private Adreno735 component so the public porting-record CI can resolve every selected component; GPU work remains on wip/ufs-smmu.", "public main board.toml omits the private Adreno735 component; GPU work remains on wip/ufs-smmu."]
+findings = ["DRAM is 12 GiB on this unit but the ADT publishes a smaller owned window; the apps SMMU sits at 0x15000000 and the UFS DMA stream 0x60 is bypassed through it.", "2026-11-15: a 176 MiB wired buffer for the APFS container is allocated and addressed by the UFS DMA engine, and the same path writes back to UFS (p356).", "The public main board.toml omits the private Adreno735 component so the public porting-record CI can resolve every selected component; GPU work remains on wip/ufs-smmu.", "public main board.toml omits the private Adreno735 component; GPU work remains on wip/ufs-smmu.", "2026-11-20 static audit: the DTS exposes one 2 GiB window at 0x80000000; owned_memory_size now matches it. The stock pram at 0xa7000000 overlaps UEFI_FD (0xa7100000 + 0x300000), so pram moves to 0xe6440000 above Display_Reserved; this remains TODO(verify) against the live UEFI map."]
 completion = ["Every handoff region is accounted for and each DMA engine reaches its range with the documented cache policy."]
-limits = ["The RAM size varies by SKU and the ADT owned window is smaller than physical DRAM; the 184 MiB APFS container is allocated as wired memory at boot."]
+limits = ["The RAM size varies by SKU and the ADT owned window is smaller than physical DRAM; the 184 MiB APFS container is allocated as wired memory at boot.", "No live UEFI memory-map capture since the range change; do not package or flash this revision until the map is verified."]
 next_action = ["Read the firmware memory map and record it here.", "Size the ADT owned window from the real memory map before any large install target is mapped."]
 
 [[area.evidence]]

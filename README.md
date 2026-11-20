@@ -33,7 +33,7 @@ components and firmware sources are published here.
 | Area | Status | Evidence interpretation |
 | --- | --- | --- |
 | cpu | device-verified | current path evidence |
-| memory | device-verified | current path evidence |
+| memory | implemented | 2 GiB window changed; live UEFI map verification pending |
 | display | device-verified | current path evidence |
 | userspace | device-verified | current path evidence |
 | firmware | implemented | historical device evidence; not reproducible from main as-is |
@@ -43,7 +43,7 @@ components and firmware sources are published here.
 | gpu | implemented | private Adreno735 work is on wip/ufs-smmu |
 | input/usb/network/audio/power | planned | no current evidence |
 
-Detailed current/historical evidence counts are in [docs/evidence-status.md](docs/evidence-status.md).
+Detailed current/historical evidence counts are in [docs/evidence-status.md](docs/evidence-status.md). Memory ranges are audited in [docs/memory-audit.md](docs/memory-audit.md).
 
 ## Structure
 

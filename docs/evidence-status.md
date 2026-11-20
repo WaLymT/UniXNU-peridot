@@ -20,7 +20,7 @@
 | configuration | implemented | 0 | 1 | 配置来源，无设备证据 |
 | firmware | implemented | 0 | 2 | p478/p491/p538/p539 等设备观察属于历史 |
 | cpu | device-verified | 1 | 1 | 当前路径仍有 evidence；另一条为历史 |
-| memory | device-verified | 1 | 1 | 同上 |
+| memory | implemented | 0 | 2 | 2 GiB 窗口调整后尚无 live UEFI map 证据 |
 | storage | implemented | 0 | 23 | APFS/UFS 设备证据均早于当前 main |
 | display | device-verified | 1 | 0 | 当前路径一致 |
 | gpu | implemented | 1 | 1 | 私有 Adreno735 不在 public main 组件列表 |

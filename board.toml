@@ -130,7 +130,7 @@ kernel_args = ["-v", "native-ufs-probe=18", "sheng-pmgr=2", "amfi_get_out_of_my_
 # tool needs the host SoC id instead.
 chip_id = "32785"
 # Contiguous window DarwinBoot maps: 256 MiB to 8 GiB in 2 MiB steps.
-owned_memory_size = "0x100000000"
+owned_memory_size = "0x80000000"
 # CPU MPIDR values read from the stock DTS: eight cores at 0x000..0x700.
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
@@ -149,7 +149,7 @@ unique_chip_id = "required"
 [adt]
 
 [adt.pram]
-address = "0xa7000000"
+address = "0xe6440000"
 size = "0x400000"
 
 [adt.chosen.u32]
