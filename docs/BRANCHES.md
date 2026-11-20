@@ -68,6 +68,17 @@
 - 不使用 force push 绕过限制
 - 如确需恢复上游推送，必须由操作者明确解除本地 pushurl 和 hook
 
+## 远端推送策略
+
+默认只允许推送到 WaLymT 个人仓库。
+
+- 个人仓库：https://github.com/WaLymT/UniXNU-peridot.git
+- 上游仓库：UniXNU/UniXNU、Project-Silicium/Mu-Silicium
+- 上游 push 已禁用：remote.origin.pushurl 设为 no-push://，并放置 pre-push hook
+- C:/ms 的 Project-Silicium 远端同样禁止直接 push
+- 向上游贡献只能通过个人 fork + PR
+- 恢复上游推送必须由操作者明确解除 protection
+
 ## 当前阻塞
 
 - live UEFI memory map 尚未抓到；
