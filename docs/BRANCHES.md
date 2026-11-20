@@ -81,8 +81,8 @@
 
 ## 当前阻塞
 
-- live UEFI memory map 尚未抓到；
-- wip 已同步 2 GiB/pram 修正，等待同一份固件的 live UEFI map 验证；
+- pram 区间已在 live UEFI map 上确认（0xe6440000+0x19bc0000 type 7），完整 map 与 fastboot oem log 仍待 USB 枚举修复；
+- fastboot USB 设备枚举在未改动的 p539 上同样失败，属既有问题，与本轮 RX 修复无关；
 - 公开 catalog 尚未合并 Adreno735/Sm8635Platform。
 
-在以上三项完成前，两个分支都不得进入打包或刷写。
+打包可以继续；刷写仍只允许 `fastboot boot`，`boot_a` 不写未签名调试镜像。
