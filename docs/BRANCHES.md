@@ -57,6 +57,17 @@
 4. 不使用 force push 覆盖另一条分支；
 5. 每次推送后检查对应分支的 CI。
 
+## Catalog 上游推送策略
+
+默认禁止直接向 Catalog 上游推送。
+
+- 上游仓库：UniXNU/UniXNU
+- 本地克隆的 origin.pushurl 已设为 no-push://catalog-upstream-disabled
+- 本地 pre-push hook 会拒绝所有直接 push
+- 正确流程：fork -> 在 fork 分支提交 -> 向上游开 PR
+- 不使用 force push 绕过限制
+- 如确需恢复上游推送，必须由操作者明确解除本地 pushurl 和 hook
+
 ## 当前阻塞
 
 - live UEFI memory map 尚未抓到；
