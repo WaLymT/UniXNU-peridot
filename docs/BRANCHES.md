@@ -7,7 +7,7 @@
 | 分支 | 职责 | 组件策略 | 可打包/刷写 |
 | --- | --- | --- | --- |
 | main | 公开发布快照、文档、CI | 只选择公开 catalog 组件；不选择 Adreno735/Sm8635Platform | 内存 live map 验证前不打包/刷写 |
-| wip/ufs-smmu | GPU/Adreno735、DarwinBoot、Fastboot、GDSC/RSC 开发 | GPU 源码保留；私有组件暂时从可校验列表移除 | 同步内存修正并验证 live map 前不打包/刷写 |
+| wip/ufs-smmu | GPU/Adreno735、DarwinBoot、Fastboot、GDSC/RSC 开发 | GPU 源码保留；私有组件暂时从可校验列表移除 | 内存修正已同步；live map 验证前不打包/刷写 |
 
 ## 发布快照 main
 
@@ -37,8 +37,8 @@
 
 当前限制：
 
-- 仍可能保留旧内存值（owned_memory_size = 0x100000000、pram 0xa7000000）；
-- 在同步 main 的 2 GiB/pram 修正并完成 live UEFI map 验证前，不能打包或刷写；
+- 内存值已与 main 同步（owned_memory_size = 0x80000000、pram 0xe6440000，见 docs/memory-audit.md）；
+- 在完成 live UEFI map 验证前，不能打包或刷写；
 - CI 的记录检查通过不代表构建或设备验证通过。
 
 ## Catalog
@@ -82,7 +82,7 @@
 ## 当前阻塞
 
 - live UEFI memory map 尚未抓到；
-- wip 尚未同步 2 GiB/pram 修正；
+- wip 已同步 2 GiB/pram 修正，等待同一份固件的 live UEFI map 验证；
 - 公开 catalog 尚未合并 Adreno735/Sm8635Platform。
 
 在以上三项完成前，两个分支都不得进入打包或刷写。

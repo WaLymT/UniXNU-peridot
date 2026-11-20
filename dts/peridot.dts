@@ -11,8 +11,9 @@
     model = "Xiaomi Redmi Turbo 3 / POCO F6";
     compatible = "xiaomi,peridot", "qcom,cliffs-mtp", "qcom,cliffs", "qcom,sm8635";
 
-    // TODO(verify): 12 GiB at 0x80000000. Confirm with the firmware map; the
-    // size cell needs the 64-bit form <0x3 0x00000000>.
+    // XNU owns the low 2 GiB window starting at 0x80000000. The phone has
+    // 12 GiB physically, but the firmware memory map and ADT expose only this
+    // contiguous window. Keep this value equal to payload.dram_size.
     memory@80000000 {
         device_type = "memory";
         reg = <0 0x80000000 0 0x80000000>;
@@ -20,11 +21,13 @@
 
     // Persistent panic log (pexpert check_for_panic_log): XNU maps /pram and keeps the
     // last panic text in /chosen's embedded-panic-log-size window. patched
-    // peridot-last-panic-print.patch prints it on the next boot. The address is the
-    // stock ramoops carve-out, which is reserved DRAM and survives a warm reset.
+    // peridot-last-panic-print.patch prints it on the next boot. The stock
+    // ramoops at 0xa7000000 overlaps the Mu-Silicium UEFI FD (0xa7100000 +
+    // 0x300000); use the gap immediately above Display_Reserved instead.
+    // TODO(verify): confirm this range is not allocated by UEFI on next boot.
     pram {
         compatible = "pram";
-        reg = <0 0xa7000000 0 0x400000>;
+        reg = <0 0xe6440000 0 0x400000>;
     };
 
     chosen {

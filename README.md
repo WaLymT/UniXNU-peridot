@@ -63,7 +63,8 @@ inputs and never enter this repository.
 
 `board.toml` marks every unverified value with `TODO(verify)` or `TODO(REQUIRED)`:
 
-- `payload.dram_size` and `payload.adt.owned_memory_size`: the 12 GiB window.
+- `payload.dram_size` and `payload.adt.owned_memory_size`: the owned DRAM
+  window (2 GiB since 2026-11-20, matching the single DTS memory node).
 - `userdata.first_lba` and `userdata.last_lba`: from this phone's GPT.
 - `payload.adt.chip_id`: currently the impersonated platform's id.
 - `payload.adt.root_match_volume_uuid`: a property of the selected iPadOS image.

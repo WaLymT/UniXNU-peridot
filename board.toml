@@ -130,7 +130,9 @@ kernel_args = ["-v", "native-ufs-probe=18", "sheng-pmgr=2", "amfi_get_out_of_my_
 # tool needs the host SoC id instead.
 chip_id = "32785"
 # Contiguous window DarwinBoot maps: 256 MiB to 8 GiB in 2 MiB steps.
-owned_memory_size = "0x100000000"
+# 2 GiB matches the single memory node in dts/peridot.dts; the old 4 GiB value
+# exceeded the declared DRAM window (docs/memory-audit.md).
+owned_memory_size = "0x80000000"
 # CPU MPIDR values read from the stock DTS: eight cores at 0x000..0x700.
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 psci_method = "smc"
@@ -144,12 +146,14 @@ root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 unique_chip_id = "required"
 
 # Persistent panic log: pexpert check_for_panic_log() maps /pram and keeps the last panic
-# text in the /chosen window. The address is the stock ramoops carve-out, which is reserved
-# DRAM and survives a warm reset (TODO(verify): confirm nothing else writes 0xa7000000).
+# text in the /chosen window. The stock ramoops at 0xa7000000 overlaps FD_Reserved
+# (0xa7000000 + 0x100000) and UEFI_FD (0xa7100000 + 0x300000), so pram moves into the
+# 0x400000 gap directly above Display_Reserved (0xe3940000 + 0x2b00000), ending at
+# 0xe6840000 inside the 2 GiB window. TODO(verify): confirm against the live UEFI map.
 [adt]
 
 [adt.pram]
-address = "0xa7000000"
+address = "0xe6440000"
 size = "0x400000"
 
 [adt.chosen.u32]
