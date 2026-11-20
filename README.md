@@ -75,6 +75,10 @@ selects a filesystem.
 
 Borrowed code and repository sources are listed in [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
 
+## Handoff
+
+- [2026-11-20 handoff: local and remote repositories](docs/HANDOFF-2026-11-20.md)
+
 ## Documentation
 
 - [Device repository](https://unixnu.com/porting/device-repository)
