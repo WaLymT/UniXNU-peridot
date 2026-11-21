@@ -3374,7 +3374,164 @@ static void publishNativeBdev (bool claimRoot)
 // .patch) and bsd_init's own vfs_mountroot mounts APFS from it.
 extern "C" dev_t mdevadd (int devid, uint64_t base, unsigned int size, int phys);
 static const uint64_t kApfsMdBytes = 184549376ULL;      // 4096 x 45056, the whole container
+static const uint64_t kApfsMdBlocks = kApfsMdBytes / 4096;
 static uint8_t *gApfsMdMemory = nullptr;
+
+// Where the container lives is a boot argument, not a constant: the dual-boot layout keeps it
+// in the free tail of the super partition so Android keeps the whole userdata partition.
+//   peridot-apfs-src=<partition>:<sector>   root source (default userdata:0)
+//   peridot-apfs-copy=<partition>:<sector>  one-shot installer, see apfsCopyContainer()
+static void apfsParsePlacement (const char *name, char *buf, size_t size,
+                                const char **part, uint64_t *sector, const char **mode)
+{
+  *part = "userdata";
+  *sector = 0;
+  if (mode) {
+    *mode = nullptr;
+  }
+  if (!PE_parse_boot_argn (name, buf, static_cast<int> (size))) {
+    return;
+  }
+  char *colon = nullptr;
+  for (char *p = buf; *p; p++) {
+    if (*p == ':') {
+      colon = p;
+      break;
+    }
+  }
+  if (!colon) {
+    IOLog ("NATIVE_UFS apfs: %s=%s has no ':<sector>' part\n", name, buf);
+    return;
+  }
+  *colon = '\0';
+  uint64_t value = 0;
+  char *p = colon + 1;
+  for (; (*p >= '0') && (*p <= '9'); p++) {
+    value = value * 10 + static_cast<uint64_t> (*p - '0');
+  }
+  // optional ":peek" (read-only survey) or ":force" (skip the zero check)
+  if (mode && (*p == ':')) {
+    *mode = p + 1;
+  }
+  if (buf[0]) {
+    *part = buf;
+  }
+  *sector = value;
+}
+
+// One-shot installer for the dual-boot layout (2026-11-21): copy the 184 MiB container from the
+// root source to <partition>:<sector>, refuse a target that is not all zero, verify every chunk
+// by reading it back, then stop with a single report line. The next boot without this argument
+// takes the root from peridot-apfs-src.
+static void apfsCopyContainer (const uint8_t *container)
+{
+  char buf[64];
+  const char *part = "userdata";
+  const char *mode = nullptr;
+  uint64_t sector = 0;
+  apfsParsePlacement ("peridot-apfs-copy", buf, sizeof (buf), &part, &sector, &mode);
+  const bool peek = (mode != nullptr) && (mode[0] == 'p');
+  const bool force = (mode != nullptr) && (mode[0] == 'f');
+  uint32_t lun = 0;
+  uint64_t first = 0, blocks = 0;
+  if (!native_ufs_part_find (part, &lun, &first, &blocks)) {
+    panic ("NATIVE_UFS apfs-copy: no %s partition in the GPT", part);
+  }
+  if ((sector + kApfsMdBlocks) > blocks) {
+    panic ("NATIVE_UFS apfs-copy: %s+%llx is smaller than the container", part,
+           static_cast<unsigned long long> (sector));
+  }
+  const uint64_t target = first + sector;
+  // The transport only serves LBAs inside an opened window (hostInWindow is the last guard
+  // before a WRITE(10)); without this the target reads fail and look like "not zero".
+  if (!hostMediaOpen (target, kApfsMdBlocks)) {
+    panic ("NATIVE_UFS apfs-copy: cannot open the target window at %s+%llx",
+           part, static_cast<unsigned long long> (sector));
+  }
+  const uint32_t kChunkBlocks = kDataMax / 4096;      // 128 KiB, the transport's per-command cap
+  uint8_t *source = static_cast<uint8_t *> (IOMalloc (kChunkBlocks * 4096ULL));
+  uint8_t *targetBuf = static_cast<uint8_t *> (IOMalloc (kChunkBlocks * 4096ULL));
+  if (!source || !targetBuf) {
+    panic ("NATIVE_UFS apfs-copy: no buffers");
+  }
+  unsigned dirty = 0, copyErrors = 0, verifyErrors = 0, readErrors = 0;
+  uint64_t firstDirtyBlock = 0, dirtyChunks = 0, firstReadError = 0;
+  uint8_t head[16] = { 0 };
+  for (uint64_t off = 0; off < kApfsMdBlocks; off += kChunkBlocks) {
+    uint32_t n = static_cast<uint32_t> ((kApfsMdBlocks - off) < kChunkBlocks ? (kApfsMdBlocks - off) : kChunkBlocks);
+    if (hostRead4k (lun, target + off, n, targetBuf) != kIOReturnSuccess) {
+      readErrors++;
+      firstReadError = off;
+      break;
+    }
+    bool chunkDirty = false;
+    for (uint32_t i = 0; i < n * 4096U; i++) {
+      if (targetBuf[i]) {
+        chunkDirty = true;
+        if (!dirty) {
+          firstDirtyBlock = off + (i / 4096U);
+          for (uint32_t k = 0; (k < sizeof (head)) && ((i / 4096U) * 4096U + k < n * 4096U); k++) {
+            head[k] = targetBuf[(i / 4096U) * 4096U + k];
+          }
+        }
+        break;
+      }
+    }
+    if (chunkDirty) {
+      dirty = 1;
+      dirtyChunks++;
+      if (!peek) {
+        break;
+      }
+    }
+  }
+  if (readErrors) {
+    panic ("NATIVE_UFS apfs-copy: read failed %s+%llx lba=%llx at=+%llx errors=%u",
+           part, static_cast<unsigned long long> (sector), static_cast<unsigned long long> (target),
+           static_cast<unsigned long long> (firstReadError), readErrors);
+  }
+  if (peek) {
+    panic ("NATIVE_UFS apfs-peek %s lun=%u first=%llx blocks=%llx sector=%llx lba=%llx dirtychunks=%d firstblock=%llx head=%02x%02x%02x%02x%02x%02x%02x%02x",
+           part, lun, static_cast<unsigned long long> (first), static_cast<unsigned long long> (blocks),
+           static_cast<unsigned long long> (sector), static_cast<unsigned long long> (target),
+           static_cast<int> (dirtyChunks), static_cast<unsigned long long> (firstDirtyBlock),
+           head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+  }
+  if (dirty && !force) {
+    panic ("NATIVE_UFS apfs-copy: target %s+%llx is not zero, refusing to write", part,
+           static_cast<unsigned long long> (sector));
+  }
+  if (!container) {
+    panic ("NATIVE_UFS apfs-copy: no container in memory");
+  }
+  uint64_t t0 = mach_absolute_time ();
+  for (uint64_t off = 0; off < kApfsMdBlocks; off += kChunkBlocks) {
+    uint32_t n = static_cast<uint32_t> ((kApfsMdBlocks - off) < kChunkBlocks ? (kApfsMdBlocks - off) : kChunkBlocks);
+    memcpy (source, container + off * 4096ULL, n * 4096ULL);
+    if (hostWrite4k (lun, target + off, n, source, true) != kIOReturnSuccess) {
+      copyErrors++;
+      break;
+    }
+  }
+  uint64_t t1 = mach_absolute_time ();
+  for (uint64_t off = 0; off < kApfsMdBlocks; off += kChunkBlocks) {
+    uint32_t n = static_cast<uint32_t> ((kApfsMdBlocks - off) < kChunkBlocks ? (kApfsMdBlocks - off) : kChunkBlocks);
+    if (hostRead4k (lun, target + off, n, targetBuf) != kIOReturnSuccess ||
+        memcmp (targetBuf, container + off * 4096ULL, n * 4096ULL)) {
+      verifyErrors++;
+      break;
+    }
+  }
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds (t1 - t0, &ns);
+  IOFree (source, kChunkBlocks * 4096ULL);
+  IOFree (targetBuf, kChunkBlocks * 4096ULL);
+  panic ("NATIVE_UFS apfs-copy dst=%s+%llx lba=%llx mib=%d copyerr=%d verifyerr=%d ms=%d ok=%d",
+         part, static_cast<unsigned long long> (sector), static_cast<unsigned long long> (target),
+         static_cast<int> (kApfsMdBytes >> 20), static_cast<int> (copyErrors),
+         static_cast<int> (verifyErrors), static_cast<int> (ns / 1000000ULL),
+         (copyErrors == 0 && verifyErrors == 0) ? 1 : 0);
+}
 
 static bool startApfsMdRoot ()
 {
@@ -3382,16 +3539,23 @@ static bool startApfsMdRoot ()
   if (!hostBringUp (&why)) {
     panic ("NATIVE_UFS apfs-md: bring-up failed: %s", why);
   }
+  char srcBuf[64];
+  const char *part = "userdata";
+  uint64_t srcSector = 0;
+  apfsParsePlacement ("peridot-apfs-src", srcBuf, sizeof (srcBuf), &part, &srcSector, nullptr);
   uint32_t lun = 0;
   uint64_t first = 0, blocks = 0;
-  if (!native_ufs_part_find ("userdata", &lun, &first, &blocks)) {
-    panic ("NATIVE_UFS apfs-md: no userdata partition in the GPT");
+  if (!native_ufs_part_find (part, &lun, &first, &blocks)) {
+    panic ("NATIVE_UFS apfs-md: no %s partition in the GPT", part);
   }
-  IOLog ("NATIVE_UFS apfs-md: userdata lun=%u first=%llx blocks=%llx\n", lun,
-         static_cast<unsigned long long> (first), static_cast<unsigned long long> (blocks));
-  if (blocks * 4096ULL < kApfsMdBytes) {
-    panic ("NATIVE_UFS apfs-md: userdata is smaller than the container");
+  IOLog ("NATIVE_UFS apfs-md: %s lun=%u first=%llx blocks=%llx off=%llx\n", part, lun,
+         static_cast<unsigned long long> (first), static_cast<unsigned long long> (blocks),
+         static_cast<unsigned long long> (srcSector));
+  if (blocks < (srcSector + kApfsMdBlocks)) {
+    panic ("NATIVE_UFS apfs-md: %s+%llx is smaller than the container", part,
+           static_cast<unsigned long long> (srcSector));
   }
+  first += srcSector;
   gApfsMdMemory = static_cast<uint8_t *> (IOMalloc (kApfsMdBytes + 4096));
   if (!gApfsMdMemory) {
     panic ("NATIVE_UFS apfs-md: cannot allocate %llu bytes",
@@ -3403,6 +3567,12 @@ static bool startApfsMdRoot ()
   }
   if (le32 (memory + 0x20) != 0x4253584e) {
     panic ("NATIVE_UFS apfs-md: no NXSB at +0x20 (magic %08x)", le32 (memory + 0x20));
+  }
+  // Dual-boot installer: place the container where Android will never look, then stop so the
+  // report is visible on screen. The next boot drops this argument and sets peridot-apfs-src.
+  char copyArg[64];
+  if (PE_parse_boot_argn ("peridot-apfs-copy", copyArg, sizeof (copyArg))) {
+    apfsCopyContainer (memory);
   }
   // Register only the container range, not the whole partition: hostInWindow() is the last
   // guard before a WRITE(10), and handing it all ~481 GiB of userdata would let any offset error
@@ -4645,6 +4815,68 @@ bool NativeUfs::start (IOService *provider)
     }
     thread_deallocate (thread);
     return true;
+  }
+  if (probe == 46) {
+    // Read-only survey of the live liblp table on super. The dual-boot layout writes the APFS
+    // container into super's free tail, and that offset came from the ROM image; this prints the
+    // device's own numbers so the two can be compared before anything else is written there.
+    const char *why = "";
+    if (!hostBringUp (&why)) panic ("NATIVE_UFS super-probe: bring-up failed: %s", why);
+    uint32_t lun = 0;
+    uint64_t first = 0, blocks = 0;
+    if (!native_ufs_part_find ("super", &lun, &first, &blocks)) {
+      panic ("NATIVE_UFS super-probe: no super partition in the GPT");
+    }
+    const uint32_t headBlocks = 0x40;                 // 64 x 4 KiB = 0x40000 bytes
+    uint8_t *head = static_cast<uint8_t *> (IOMalloc (headBlocks * 4096ULL));
+    if (!head) panic ("NATIVE_UFS super-probe: no buffer");
+    if (!native_ufs_part_read (lun, first, headBlocks, head)) {
+      panic ("NATIVE_UFS super-probe: cannot read the head of super");
+    }
+    uint32_t geomMagic = 0, metaMagic = 0, hdrSize = 0;
+    uint32_t poff = 0, pnum = 0, pent = 0, eoff = 0, enumCount = 0, eent = 0, goff = 0, gnum = 0;
+    memcpy (&geomMagic, head + 0x1000, 4);
+    memcpy (&metaMagic, head + 0x3000, 4);
+    if (metaMagic == 0x414c5030) {
+      memcpy (&hdrSize, head + 0x3000 + 8, 4);
+      memcpy (&poff, head + 0x3000 + 80, 4);
+      memcpy (&pnum, head + 0x3000 + 84, 4);
+      memcpy (&pent, head + 0x3000 + 88, 4);
+      memcpy (&eoff, head + 0x3000 + 92, 4);
+      memcpy (&enumCount, head + 0x3000 + 96, 4);
+      memcpy (&eent, head + 0x3000 + 100, 4);
+      memcpy (&goff, head + 0x3000 + 104, 4);
+      memcpy (&gnum, head + 0x3000 + 108, 4);
+    }
+    uint64_t usedEnd = 0;
+    uint32_t seenParts = 0, seenExtents = 0;
+    const uint8_t *tables = head + 0x3000 + hdrSize;
+    for (uint32_t i = 0; (i < pnum) && (i < 32); i++) {
+      const uint8_t *entry = tables + poff + i * pent;
+      uint32_t efirst = 0, ecount = 0;
+      memcpy (&efirst, entry + 40, 4);
+      memcpy (&ecount, entry + 44, 4);
+      seenParts++;
+      for (uint32_t e = 0; (e < ecount) && (e < 32); e++) {
+        const uint8_t *ext = tables + eoff + (efirst + e) * eent;
+        uint64_t sectors = 0;
+        uint32_t type = 0, data = 0;
+        memcpy (&sectors, ext, 8);
+        memcpy (&type, ext + 8, 4);
+        memcpy (&data, ext + 12, 4);
+        seenExtents++;
+        if (type == 0) {
+          const uint64_t end = static_cast<uint64_t> (data) + sectors;
+          if (end > usedEnd) usedEnd = end;
+        }
+      }
+    }
+    IOFree (head, headBlocks * 4096ULL);
+    panic ("NATIVE_UFS super-probe lun=%u first=%llx blocks=%llx geom=%08x meta=%08x hdr=%u parts=%u/%u ext=%u/%u usedend=%llx ourstart=%llx",
+           lun, static_cast<unsigned long long> (first), static_cast<unsigned long long> (blocks),
+           geomMagic, metaMagic, hdrSize, seenParts, pnum, seenExtents, enumCount,
+           static_cast<unsigned long long> (usedEnd),
+           static_cast<unsigned long long> (2153155ULL * 8));
   }
   if (probe == 39) {
     // Boot from the installed target: the bdevsw disk is the install-target window (written by

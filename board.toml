@@ -122,7 +122,7 @@ dram_size = "0x80000000"
 # this configuration anywhere.
 # native-ufs-mountroot=1 (not used in this profile) would run vfs_mountroot() on the bdevsw
 # window once the block-device ioctls answer; probes 20/21/22 and 30-33 are diagnostics.
-kernel_args = ["-v", "native-ufs-probe=18", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1", "offline-apfs-load=1", "rd=md1", "amfi-allows-trust-cache-load=1", "amfi_allow_any_signature=1", "-restore"]
+kernel_args = ["-v", "native-ufs-probe=18", "peridot-apfs-src=super:2153155", "sheng-pmgr=2", "amfi_get_out_of_my_way=1", "peridot-allow-unsigned-root=1", "offline-apfs-load=1", "rd=md1", "amfi-allows-trust-cache-load=1", "amfi_allow_any_signature=1", "-restore"]
 
 [payload.adt]
 # TODO(verify): 32785 (0x8011) matches the iPadOS profile's impersonated
