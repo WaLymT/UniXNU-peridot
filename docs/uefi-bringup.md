@@ -157,3 +157,32 @@ python peridot\tools\dtbinitrd.py <stock.dtb> out.dtb 0x11000000 0x12000000
 python Resources\Scripts\mkbootimg.py --kernel <kernel> --ramdisk <payload.img> `
   --header_version 0 --pagesize 4096 -o Mu-peridot.img
 ```
+---
+
+## Bootloader control block: clear it from the firmware
+
+ABL starts `recovery_a` with `boot-recovery` still in the `misc` BCB, and the UEFI side never
+reports completion the way a real recovery does. The consequence on hardware (2026-11-21/22) was
+that every plain reboot after a UniXNU session went back to the UniXNU menu instead of Android;
+the only workaround was `fastboot erase misc` from a host.
+
+`DarwinBoot` now zeroes the command block of the GPT partition named `misc` as soon as the loader
+runs (`ClearBootloaderMessage()` in `DarwinBootPkg/Driver/DarwinBoot.c`, via the `PartitionInfo`
+protocol) and prints `DARWINBOOT: bcb cleared`. Entering recovery with the key combo makes ABL
+write the BCB again, so the second system stays reachable.
+
+Verified: `fastboot reboot recovery` → `bcb cleared` → XNU → long-press power → plain power on →
+Android.
+
+## Fastboot USB RX queueing
+
+`FastbootUsbRead` used to queue the OUT transfer once and give up on `EFI_NOT_READY`, which showed
+up as an endless `usb rx queue failed: Not Ready` on screen and kept host commands from reaching
+`FastbootCommand`. It now aborts the endpoint, stalls 1 ms and requeues up to four times, and only
+for `EFI_NOT_READY`; `DEVICE_STATE_CHANGE` aborts a leftover transfer instead of only clearing the
+flag. `usbcheck=1` and `usblog=1` boot arguments dump the stack state and the Advanced Logger lines
+that mention USB, so a unit whose host never enumerates can still be diagnosed from a photo.
+
+The retry loop absorbs the error (p555: `send64=Success`), but host enumeration remains open — the
+vendor stack reaches its device tree through a DAL config GUID, not `gFdtTableGuid`; see
+`notes-2026-11-20-usb-dt-service-re.md` in the workspace.
